@@ -40,9 +40,15 @@ U_no_of_control_matrices_z_axis uniform int z_con_no ; // bunlar içerde kalan m
 U_missilespeed uniform float  new_missile_speed ; 
 U_TRANSFORM_NORMAL  uniform mat3 uNormalMatrix ; // bu normaller için olan vertex.   
 U_HEIGHT_MULTIPLIER uniform int uHeightMultp ;  // bu y axisteki boyu multiply ediyo.   
-U_UPVEC_PLANE uniform vec3 plane_upvec ;  
-U_PLANE_SPEED uniform float plane_speed ;  
+U_UPVEC_PLANE uniform vec3 plane_upvec ;
+U_PLANE_SPEED uniform float plane_speed ;
 
+// ---- Added for crater deformation + enemy collision -------------------------
+layout(location = 57) uniform float crater_depth ;   // bowl depth (world units)
+layout(location = 58) uniform float crater_rim ;     // raised-lip height
+layout(location = 60) uniform vec3  enemy_pos ;       // single enemy world pos
+layout(location = 61) uniform float enemy_radius ;    // bounding-sphere radius (6)
+layout(location = 62) uniform int   enemy_alive ;     // 1 = test it, 0 = skip
 
 layout(local_size_x = 16) in;
 // 16 farklı dispatch bvar 16*16 = 256 
@@ -74,7 +80,10 @@ layout(std430 ,  binding = 10) buffer VertexBuffer {
 	vec4[] vertices ;
 };
 layout(std430 ,  binding = 11) buffer NormalBuffer {
-	vec4[] normals ;   
+	vec4[] normals ;
+};
+layout(std430 ,  binding = 12) buffer EnemyHitBuffer {
+	uint enemyHit ;   // set to 1 by any missile that strikes the enemy this frame
 };
 
 vec3 retnormal ;  
@@ -164,8 +173,119 @@ vec3[4] get_surrounding_vertices(float  x  ,  float z   ){
 	}
 	
 
-	return retval ;  
+	return retval ;
 }
+
+// ============================================================================
+//  Crater deformation + enemy collision (ported from combat.hpp)
+// ----------------------------------------------------------------------------
+//  The terrain vertex/normal SSBOs store vec3 data packed tightly into a
+//  vec4[] array, so vertex i occupies floats [3i, 3i+1, 3i+2]. These helpers
+//  read/write a single vertex Y and write a full normal, honoring that packing
+//  (same layout get_vertex() reads).
+// ============================================================================
+float get_vertex_y(int index){
+	int fy = 3*index + 1;
+	int vi = fy/4; int off = fy - vi*4;
+	if(off==0) return vertices[vi].x;
+	else if(off==1) return vertices[vi].y;
+	else if(off==2) return vertices[vi].z;
+	return vertices[vi].w;
+}
+void set_vertex_y(int index, float val){
+	int fy = 3*index + 1;
+	int vi = fy/4; int off = fy - vi*4;
+	if(off==0) vertices[vi].x = val;
+	else if(off==1) vertices[vi].y = val;
+	else if(off==2) vertices[vi].z = val;
+	else vertices[vi].w = val;
+}
+void set_normal_float(int f, float val){
+	int vi = f/4; int off = f - vi*4;
+	if(off==0) normals[vi].x = val;
+	else if(off==1) normals[vi].y = val;
+	else if(off==2) normals[vi].z = val;
+	else normals[vi].w = val;
+}
+void set_normal(int index, vec3 nrm){
+	set_normal_float(3*index+0, nrm.x);
+	set_normal_float(3*index+1, nrm.y);
+	set_normal_float(3*index+2, nrm.z);
+}
+
+// World (x,z) -> nearest terrain vertex index, or -1 if outside the grid.
+// Same index math as get_surrounding_vertices().
+int vertex_index_at(float x, float z){
+	float fl_x = floor(x); int fl_x_int = int(fl_x);
+	float fl_z = floor(z); int fl_z_int = int(fl_z);
+	if(fl_x_int < 0 || fl_x_int >= x_con_no || fl_z_int < 0 || fl_z_int >= z_con_no)
+		return -1;
+	int ox = clamp(int(floor((x-fl_x)/mystep)), 0, tesplus-1);
+	int oz = clamp(int(floor((z-fl_z)/mystep)), 0, tesplus-1);
+	return fl_x_int*z_con_no*tesplus*tesplus + fl_z_int*tesplus*tesplus
+	     + ox*tesplus + oz;
+}
+float terrain_height_at(float x, float z){
+	int idx = vertex_index_at(x, z);
+	return (idx < 0) ? 0.0f : get_vertex_y(idx);
+}
+
+// Swept segment p0->p1 vs sphere (c,r). Earliest contact t in [0,1].
+bool segmentSphere(vec3 p0, vec3 p1, vec3 c, float r, out float tHit){
+	tHit = 0.0f;
+	vec3 d = p1 - p0;
+	vec3 m = p0 - c;
+	float cc = dot(m,m) - r*r;
+	if(cc <= 0.0f) { tHit = 0.0f; return true; }      // started inside
+	float a = dot(d,d); if(a < 1e-12f) return false;
+	float b = dot(m,d); if(b > 0.0f) return false;    // moving away
+	float disc = b*b - a*cc; if(disc < 0.0f) return false;
+	float t = (-b - sqrt(disc))/a;
+	if(t < 0.0f || t > 1.0f) return false;
+	tHit = t; return true;
+}
+
+// Carve a crater into the terrain SSBO in place (bowl + rim, Y only), then
+// recompute normals over the affected region with central differences.
+void carve_crater(vec3 impact, float radius, float depth, float rim){
+	if(radius <= 0.0f) return;
+	float ms = mystep;
+	int steps = int(ceil(radius/ms));
+
+	// Pass 1: displace Y with a smooth bowl + raised lip near the rim.
+	for(int iz = -steps; iz <= steps; iz++){
+		for(int ix = -steps; ix <= steps; ix++){
+			float wx = impact.x + float(ix)*ms;
+			float wz = impact.z + float(iz)*ms;
+			float dist = length(vec2(wx,wz) - impact.xz);
+			if(dist > radius) continue;
+			int vidx = vertex_index_at(wx, wz);
+			if(vidx < 0) continue;
+			float n = dist/radius;                               // 0 centre..1 edge
+			float bowl = -depth * (1.0f - smoothstep(0.0f, 1.0f, n));
+			float rimv = rim
+				* smoothstep(0.0f, 1.0f, clamp((n-0.6f)/0.3f, 0.0f, 1.0f))
+				* (1.0f - smoothstep(0.0f, 1.0f, clamp((n-0.9f)/0.1f, 0.0f, 1.0f)));
+			set_vertex_y(vidx, get_vertex_y(vidx) + bowl + rimv);
+		}
+	}
+	// Pass 2: recompute normals from the new heights.
+	for(int iz = -steps; iz <= steps; iz++){
+		for(int ix = -steps; ix <= steps; ix++){
+			float wx = impact.x + float(ix)*ms;
+			float wz = impact.z + float(iz)*ms;
+			if(length(vec2(wx,wz) - impact.xz) > radius) continue;
+			int vidx = vertex_index_at(wx, wz);
+			if(vidx < 0) continue;
+			float hl = terrain_height_at(wx-ms, wz);
+			float hr = terrain_height_at(wx+ms, wz);
+			float hd = terrain_height_at(wx, wz-ms);
+			float hu = terrain_height_at(wx, wz+ms);
+			set_normal(vidx, normalize(vec3(hl-hr, 2.0f*ms, hd-hu)));
+		}
+	}
+}
+
 mat4 translate(vec3 offset) {
     return mat4(
         vec4(1.0, 0.0 , 0.0 , 0.0) , // Column 1
@@ -259,6 +379,10 @@ for (int i = 0; i <= num_steps; i++) {
 
             my_cur_missile.position_speed.xyz = explosion_point; // tam patladığı konumu verdi
 			updatematrices() ;   
+				// Deform the terrain in place around the impact.
+				carve_crater(explosion_point,
+				             my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.x,
+				             crater_depth, crater_rim);
             break; // PATLADI
         }
 
@@ -333,7 +457,22 @@ void main(){
 			vec3[4] endingpatch ;   
 			startingpatch =  get_surrounding_vertices(oldpos.x  ,  oldpos.z  )  ;  // başlayan patch 
 			endingpatch = get_surrounding_vertices(newpos.x  ,  newpos.z  )  ;  // sondaki patch   
-			traverse_grid(oldpos , newpos   );  
+			// Enemy hit first (swept sphere). If it misses, test the terrain.
+			float enemyT;
+			if(enemy_alive == 1 &&
+			   segmentSphere(oldpos, newpos, enemy_pos,
+			                 enemy_radius + my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.x,
+			                 enemyT)){
+				vec3 contact = mix(oldpos, newpos, enemyT);
+				my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.y = 1.0f; // BOOM
+				my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.w = 0.0f; // reset fuse
+				my_cur_missile.position_speed.xyz = contact;
+				my_cur_missile.surfacenormal.xyz = normalize(contact - enemy_pos);
+				updatematrices();
+				atomicMax(enemyHit, 1u);   // report to CPU: enemy struck this frame
+			} else {
+				traverse_grid(oldpos , newpos   );
+			}
 			}else{
 				// bu patladığı case bi süre sonra patlamayı inaktive edip 
 				my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.w +=  time_passed_since ;   // bu çok fazla olmuşsa iptal  

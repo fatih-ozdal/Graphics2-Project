@@ -8,6 +8,7 @@
 #include <vector>
 #include <cmath>
 #include <random>
+#include "../extracted/combat.hpp"   // enemy Lorenz path + collision math
 
 using namespace std;
 
@@ -838,6 +839,26 @@ BURAYA:
     glBufferData(GL_SHADER_STORAGE_BUFFER, mymissiles.size() * sizeof(Missile), mymissiles.data(), GL_DYNAMIC_COPY);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 9, missileSSBO);
 
+    // ============================================================
+    //  Enemy plane (single, Lorenz attractor path) + crater params
+    // ============================================================
+    combat::EnemyPlane enemy;
+    enemy.hitRadius      = 6.0f;                    // bounding sphere r = 6
+    enemy.path.timeScale = 0.5f;                    // attractor speed
+    enemy.path.scale     = glm::vec3(12.0f, 8.0f, 12.0f);
+    enemy.path.translate = myplane.position + glm::vec3(0.0f, 150.0f, 0.0f);
+    enemy.state          = glm::vec3(0.1f, 0.0f, 0.0f);
+
+    float crater_depth = 8.0f;     // crater bowl depth fed to missile.comp
+    float crater_rim   = 1.5f;     // raised lip height
+
+    // Tiny SSBO (1 uint): missile.comp sets it to 1 the frame the enemy is hit.
+    GLuint enemyHitSSBO;
+    glGenBuffers(1, &enemyHitSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, enemyHitSSBO);
+    { GLuint zero = 0; glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint), &zero, GL_DYNAMIC_READ); }
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 12, enemyHitSSBO);
+
     glfwSetWindowMonitor(state.window, NULL, windowwidth / 8, windowheight / 8, 7 * (windowwidth / 8), 7 * (windowheight / 8), 0);
     myinputs.texture = 4;
 
@@ -1199,9 +1220,17 @@ BURAYA:
             update_this_pos = find_inactive_missile(mymissiles);
         }
 
+        // --- Advance the enemy along its Lorenz path ---
+        combat::updateEnemy(enemy, diff);
+
+        // Reset the per-frame enemy-hit flag before dispatch.
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, enemyHitSSBO);
+        { GLuint zero = 0; glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &zero); }
+
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 9, missileSSBO);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 10, vertexBuffer);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 11, normalBuffer);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 12, enemyHitSSBO);
 
         GLuint dispatch_buffer_3;
         glUseProgram(computeShaderMissile.shaderId);
@@ -1239,9 +1268,30 @@ BURAYA:
         glBindTexture(GL_TEXTURE_2D, depthTexture);
         glUniform1i(10, 0);
 
+        // Crater + enemy-collision uniforms.
+        glUniform1f(57, crater_depth);
+        glUniform1f(58, crater_rim);
+        glUniform3fv(60, 1, glm::value_ptr(enemy.position));
+        glUniform1f(61, enemy.hitRadius);
+        glUniform1i(62, enemy.alive ? 1 : 0);
+
         glDispatchCompute(16, 1, 1);
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
         glUseProgram(0);
+
+        // Read back the enemy-hit flag -> mark the enemy dead.
+        {
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, enemyHitSSBO);
+            GLuint enemyHitFlag = 0;
+            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &enemyHitFlag);
+            if (enemyHitFlag != 0 && enemy.alive) {
+                enemy.alive = false;   // stop drawing it
+                // The striking missile is already flagged exploded in the SSBO,
+                // so its 3s BOOM state plays at the contact point. A sprite-sheet
+                // billboard (combat::sampleSprite) would be spawned here once an
+                // explosion render pass exists.
+            }
+        }
 
         glUseProgramStages(state.renderPipeline, GL_VERTEX_SHADER_BIT, vShaderMissile.shaderId);
 
@@ -1323,6 +1373,40 @@ BURAYA:
         }
 
         glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(su57.indexCount), GL_UNSIGNED_INT, nullptr);
+
+        // ============================================================
+        //  Enemy plane (reuses the player's su57 model + shaders) +
+        //  its debug wireframe bounding sphere.
+        // ============================================================
+        if (enemy.alive) {
+            glm::mat4 enemy_model = glm::translate(glm::mat4(1.0f), enemy.position)
+                                  * glm::mat4_cast(enemy.orientation)
+                                  * glm::scale(glm::mat4(1.0f), glm::vec3(0.3f));
+            glm::mat3 enemy_NormalMatrix = glm::inverseTranspose(enemy_model);
+
+            glBindVertexArray(su57.vaoId);
+            glActiveShaderProgram(state.renderPipeline, vShaderSu57.shaderId);
+            {
+                glUniformMatrix4fv(U_TRANSFORM_MODEL, 1, false, glm::value_ptr(enemy_model));
+                glUniformMatrix3fv(U_TRANSFORM_NORMAL, 1, false, glm::value_ptr(enemy_NormalMatrix));
+            }
+            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(su57.indexCount), GL_UNSIGNED_INT, nullptr);
+
+            // Debug wireframe bounding sphere (radius == enemy.hitRadius == 6).
+            glm::mat4 sphere_model = glm::translate(glm::mat4(1.0f), enemy.position)
+                                   * glm::scale(glm::mat4(1.0f), glm::vec3(enemy.hitRadius));
+            glm::mat3 sphere_NormalMatrix = glm::inverseTranspose(sphere_model);
+
+            glBindVertexArray(sphereObjceet.vaoId);
+            glActiveShaderProgram(state.renderPipeline, vShaderSu57.shaderId);
+            {
+                glUniformMatrix4fv(U_TRANSFORM_MODEL, 1, false, glm::value_ptr(sphere_model));
+                glUniformMatrix3fv(U_TRANSFORM_NORMAL, 1, false, glm::value_ptr(sphere_NormalMatrix));
+            }
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(sphereObjceet.indexCount), GL_UNSIGNED_INT, nullptr);
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        }
 
         glDepthFunc(GL_LEQUAL);
 
