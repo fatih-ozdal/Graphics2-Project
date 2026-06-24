@@ -245,8 +245,34 @@ bool segmentSphere(vec3 p0, vec3 p1, vec3 c, float r, out float tHit){
 	tHit = t; return true;
 }
 
+// Terrain patches are laid out patch-major with NO boundary deduplication, so a
+// vertex on a shared patch edge/corner exists once per adjacent patch. With
+// tesplus==2 every vertex is a patch corner, shared by up to 4 patches. For the
+// integer world vertex (vx,vz) those duplicates are:
+//   patch (vx,  vz  ) corner (0,0) -> local offset 0
+//   patch (vx-1,vz  ) corner (1,0) -> local offset tesplus
+//   patch (vx,  vz-1) corner (0,1) -> local offset 1
+//   patch (vx-1,vz-1) corner (1,1) -> local offset tesplus+1
+// Fills out_idx with the in-bounds duplicate indices and returns the count.
+int corner_duplicates(int vx, int vz, out int out_idx[4]){
+	int px[4]; int pz[4]; int cof[4];
+	px[0]=vx;   pz[0]=vz;   cof[0]=0;
+	px[1]=vx-1; pz[1]=vz;   cof[1]=tesplus;
+	px[2]=vx;   pz[2]=vz-1; cof[2]=1;
+	px[3]=vx-1; pz[3]=vz-1; cof[3]=tesplus+1;
+	int cnt = 0;
+	for(int k=0;k<4;k++){
+		if(px[k] < 0 || px[k] >= x_con_no || pz[k] < 0 || pz[k] >= z_con_no) continue;
+		out_idx[cnt] = px[k]*z_con_no*tesplus*tesplus + pz[k]*tesplus*tesplus + cof[k];
+		cnt++;
+	}
+	return cnt;
+}
+
 // Carve a crater into the terrain SSBO in place (bowl + rim, Y only), then
-// recompute normals over the affected region with central differences.
+// recompute normals over the affected region with central differences. Both
+// passes write to every duplicate of each shared vertex so patch seams don't
+// tear apart.
 void carve_crater(vec3 impact, float radius, float depth, float rim){
 	if(radius <= 0.0f) return;
 	float ms = mystep;
@@ -259,29 +285,48 @@ void carve_crater(vec3 impact, float radius, float depth, float rim){
 			float wz = impact.z + float(iz)*ms;
 			float dist = length(vec2(wx,wz) - impact.xz);
 			if(dist > radius) continue;
-			int vidx = vertex_index_at(wx, wz);
-			if(vidx < 0) continue;
+			int dup[4];
+			int cnt = corner_duplicates(int(floor(wx)), int(floor(wz)), dup);
+			if(cnt == 0) continue;
 			float n = dist/radius;                               // 0 centre..1 edge
 			float bowl = -depth * (1.0f - smoothstep(0.0f, 1.0f, n));
 			float rimv = rim
 				* smoothstep(0.0f, 1.0f, clamp((n-0.6f)/0.3f, 0.0f, 1.0f))
 				* (1.0f - smoothstep(0.0f, 1.0f, clamp((n-0.9f)/0.1f, 0.0f, 1.0f)));
-			set_vertex_y(vidx, get_vertex_y(vidx) + bowl + rimv);
+			float delta = bowl + rimv;
+			for(int k=0;k<cnt;k++)
+				set_vertex_y(dup[k], get_vertex_y(dup[k]) + delta);
 		}
 	}
-	// Pass 2: recompute normals from the new heights.
+	// Pass 2: recompute normals from the new heights. To smooth the sharp lighting
+	// discontinuities at the steep rim, average each vertex's central-difference
+	// normal over a 3x3 neighborhood instead of using the raw per-vertex normal.
 	for(int iz = -steps; iz <= steps; iz++){
 		for(int ix = -steps; ix <= steps; ix++){
 			float wx = impact.x + float(ix)*ms;
 			float wz = impact.z + float(iz)*ms;
 			if(length(vec2(wx,wz) - impact.xz) > radius) continue;
-			int vidx = vertex_index_at(wx, wz);
-			if(vidx < 0) continue;
-			float hl = terrain_height_at(wx-ms, wz);
-			float hr = terrain_height_at(wx+ms, wz);
-			float hd = terrain_height_at(wx, wz-ms);
-			float hu = terrain_height_at(wx, wz+ms);
-			set_normal(vidx, normalize(vec3(hl-hr, 2.0f*ms, hd-hu)));
+			int dup[4];
+			int cnt = corner_duplicates(int(floor(wx)), int(floor(wz)), dup);
+			if(cnt == 0) continue;
+			// Box-average the central-difference normals of the 3x3 neighbours.
+			// Each summand is negated to match the terrain's normal convention
+			// (main.cpp builds MyNormalBuffer as -normalize(...)).
+			vec3 nsum = vec3(0.0);
+			for(int nz=-1; nz<=1; nz++){
+				for(int nx=-1; nx<=1; nx++){
+					float cx = wx + float(nx)*ms;
+					float cz = wz + float(nz)*ms;
+					float hl = terrain_height_at(cx-ms, cz);
+					float hr = terrain_height_at(cx+ms, cz);
+					float hd = terrain_height_at(cx, cz-ms);
+					float hu = terrain_height_at(cx, cz+ms);
+					nsum += -normalize(vec3(hl-hr, 2.0f*ms, hd-hu));
+				}
+			}
+			vec3 nrm = normalize(nsum);
+			for(int k=0;k<cnt;k++)
+				set_normal(dup[k], nrm);
 		}
 	}
 }

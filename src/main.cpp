@@ -849,8 +849,8 @@ BURAYA:
     enemy.path.translate = myplane.position + glm::vec3(0.0f, 50.0f, 0.0f);  // start in view, 50u above the player
     enemy.state          = glm::vec3(0.1f, 0.0f, 0.0f);
 
-    float crater_depth = 8.0f;     // crater bowl depth fed to missile.comp
-    float crater_rim   = 1.5f;     // raised lip height
+    float crater_depth = 15.0f;    // crater bowl depth fed to missile.comp
+    float crater_rim   = 2.0f;     // raised lip height
 
     // Tiny SSBO (1 uint): missile.comp sets it to 1 the frame the enemy is hit.
     GLuint enemyHitSSBO;
@@ -1217,7 +1217,8 @@ BURAYA:
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
         }
 
-        glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
+        // Water draw disabled temporarily so the crater shape is visible.
+        // glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
         glBindVertexArray(0);
         glBindVertexArray(myVAO);
 
@@ -1273,7 +1274,7 @@ BURAYA:
         glUniformMatrix3fv(51, 1, false, glm::value_ptr(normalMatrix));
         glUniform1i(52, mycam.height_multiplier);
 
-        float blast_radius = 5.0f;
+        float blast_radius = 30.0f;
         glUniform1f(46, blast_radius);
         float missile_speed = 50.0f;
         glUniform1f(50, missile_speed);
