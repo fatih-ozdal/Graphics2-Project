@@ -846,7 +846,7 @@ BURAYA:
     enemy.hitRadius      = 6.0f;                    // bounding sphere r = 6
     enemy.path.timeScale = 0.5f;                    // attractor speed
     enemy.path.scale     = glm::vec3(12.0f, 8.0f, 12.0f);
-    enemy.path.translate = myplane.position + glm::vec3(10.0f, 10.0f, 0.0f);
+    enemy.path.translate = myplane.position + glm::vec3(0.0f, 50.0f, 0.0f);  // start in view, 50u above the player
     enemy.state          = glm::vec3(0.1f, 0.0f, 0.0f);
 
     float crater_depth = 8.0f;     // crater bowl depth fed to missile.comp
@@ -863,10 +863,12 @@ BURAYA:
     // Upper bound = max flight (~5000u / 450u/s ~ 11s) + 3s fuse.
     const float kMissileLifetime  = 15.0f;
     float       missileActiveUntil = -1.0f;
+    bool        anyMissileActive   = false;  // gates the enemy-hit readback; cleared on expiry or hit
 
     glfwSetWindowMonitor(state.window, NULL, windowwidth / 8, windowheight / 8, 7 * (windowwidth / 8), 7 * (windowheight / 8), 0);
     myinputs.texture = 4;
 
+    unsigned long frameCount = 0;   // debug: throttle the enemy position print
     while (!glfwWindowShouldClose(state.window)) {
         glfwPollEvents();
         current_time = static_cast<float>(glfwGetTime());
@@ -1224,10 +1226,23 @@ BURAYA:
             myinputs.space_pressed = false;
             update_this_pos = find_inactive_missile(mymissiles);
             missileActiveUntil = current_time + kMissileLifetime;
+            anyMissileActive   = true;
         }
 
         // --- Advance the enemy along its Lorenz path ---
-        combat::updateEnemy(enemy, diff);
+        // Clamp the step: the first frame's diff spans the whole terrain-load
+        // time (last_time starts at 0), and a large step makes the RK4 Lorenz
+        // integrator overflow to inf -> NaN, which then sticks every frame.
+        combat::updateEnemy(enemy, glm::min(diff, 0.05f));
+
+        // Debug: confirm the enemy is alive and moving (every 60 frames).
+        if (frameCount % 60 == 0) {
+            std::cout << "\n[enemy] frame " << frameCount
+                      << " pos = (" << enemy.position.x << ", "
+                      << enemy.position.y << ", " << enemy.position.z << ")"
+                      << " alive = " << (enemy.alive ? 1 : 0) << std::endl;
+        }
+        frameCount++;
 
         // Reset the per-frame enemy-hit flag before dispatch.
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, enemyHitSSBO);
@@ -1285,15 +1300,20 @@ BURAYA:
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
         glUseProgram(0);
 
+        // No CPU-visible missile "active" flag exists (it's only set GPU-side),
+        // so a missile is considered inactive once its lifetime window elapses.
+        if (anyMissileActive && current_time >= missileActiveUntil)
+            anyMissileActive = false;
+
         // Read back the enemy-hit flag only while a missile is in flight (gates the
         // VIDEO->HOST copy that otherwise ran every frame).
-        bool anyMissileActive = (current_time < missileActiveUntil);
         if (anyMissileActive && enemy.alive) {
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, enemyHitSSBO);
             GLuint enemyHitFlag = 0;
             glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &enemyHitFlag);
             if (enemyHitFlag != 0) {
-                enemy.alive = false;   // stop drawing it
+                enemy.alive = false;        // stop drawing it
+                anyMissileActive = false;   // the missile is gone; stop polling immediately
                 // Reset the SSBO flag immediately so it can't re-trigger next frame.
                 GLuint zero = 0;
                 glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &zero);
