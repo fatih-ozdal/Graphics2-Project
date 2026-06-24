@@ -159,14 +159,14 @@ void main(void)
 		vec4 tercolor;
 		vec4 reflectness;
 
-		vec4 tex1 = texture2D(gDiff, fUV) ;
-		vec4 tex2 = texture2D(gRough, fUV) ;
-		vec4 tex3 = texture2D(rDiff, fUV);
-		vec4 tex4 = texture2D(rRough, fUV);
-		vec4 tex5 = texture2D(sH_diff, fUV);
-		vec4 tex6 = texture2D(sH_rough, fUV);
-		vec4 tex7 = texture2D(sN_diff, fUV);
-		vec4 tex8 = texture2D(sN_rough, fUV);
+		vec4 tex1 = texture(gDiff, fUV) ;
+		vec4 tex2 = texture(gRough, fUV) ;
+		vec4 tex3 = texture(rDiff, fUV);
+		vec4 tex4 = texture(rRough, fUV);
+		vec4 tex5 = texture(sH_diff, fUV);
+		vec4 tex6 = texture(sH_rough, fUV);
+		vec4 tex7 = texture(sN_diff, fUV);
+		vec4 tex8 = texture(sN_rough, fUV);
 
 
 		if(fHeight <0.01){
@@ -268,6 +268,8 @@ void main(void)
     }
 	fboColor = tercolor  ;
     break;
+	}
+
 	case 3:{
 
 
@@ -284,14 +286,14 @@ void main(void)
 		vec4 tercolor;
 		vec4 reflectness;
 
-		vec4 tex1 = texture2D(gDiff, fUV) ;
-		vec4 tex2 = texture2D(gRough, fUV) ;
-		vec4 tex3 = texture2D(rDiff, fUV);
-		vec4 tex4 = texture2D(rRough, fUV);
-		vec4 tex5 = texture2D(sH_diff, fUV);
-		vec4 tex6 = texture2D(sH_rough, fUV);
-		vec4 tex7 = texture2D(sN_diff, fUV);
-		vec4 tex8 = texture2D(sN_rough, fUV);
+		vec4 tex1 = texture(gDiff, fUV) ;
+		vec4 tex2 = texture(gRough, fUV) ;
+		vec4 tex3 = texture(rDiff, fUV);
+		vec4 tex4 = texture(rRough, fUV);
+		vec4 tex5 = texture(sH_diff, fUV);
+		vec4 tex6 = texture(sH_rough, fUV);
+		vec4 tex7 = texture(sN_diff, fUV);
+		vec4 tex8 = texture(sN_rough, fUV);
 
 		if(fHeight <0.01){
 		tercolor = vec4(0.1f ,0.7f ,0.9f , 1.0f);
@@ -328,9 +330,6 @@ void main(void)
 	
 	}
 
-
-
-		}
 		// If mode is wrong, put pure white.
 		default: fboColor = vec4(1); break;
 	}
@@ -367,20 +366,20 @@ void main(void)
 
 					switch(texno){
 				case 0:{
-					texcolor1 = texture2D(Tsunset , nfUV );
+					texcolor1 = texture(Tsunset , nfUV );
 					break;
 				}
 				case 1:{
-					texcolor1 = texture2D(Tsky , nfUV );
+					texcolor1 = texture(Tsky , nfUV );
 					break;
 				}
 				case 2:{
-					texcolor1 = texture2D(Tchurch , nfUV );
+					texcolor1 = texture(Tchurch , nfUV );
 					break;
 				}
 				case 3:{
-					vec4 col1 = texture2D(Tsunset , nfUV );
-					vec4 col2 = texture2D(Tsky , nfUV );
+					vec4 col1 = texture(Tsunset , nfUV );
+					vec4 col2 = texture(Tsky , nfUV );
 					texcolor1 = mix(col1 , col2 , 0.5f );
 					break;
 				}
@@ -394,7 +393,7 @@ void main(void)
 					break ;   
 				}
 				default:{
-					texcolor1 = texture2D(Tsunset , nfUV );
+					texcolor1 = texture(Tsunset , nfUV );
 					break;
 				}
 

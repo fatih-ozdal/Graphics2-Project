@@ -57,8 +57,8 @@ void main(void)
 
 
 	vec3 hdrvalues ;
-	vec4 gethdr = texture2D(trendered, fUV) ;
-    hdrvalues = texture2D(trendered, fUV).xyz ;
+	vec4 gethdr = texture(trendered, fUV) ;
+    hdrvalues = texture(trendered, fUV).xyz ;
 
 	float constant = 0.8 ;
 

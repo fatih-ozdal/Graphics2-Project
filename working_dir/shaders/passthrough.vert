@@ -57,8 +57,9 @@ U_AVGLUM	uniform sampler2D uMipmapID ;
 void main(void)
 {
 
-	avglum = exp(texture(uMipmapID,vec2(0.5,0.5),20.0).a);
-	// galiba mipmap için fln textureLod kullanamam gerekiyodu.
+	// Vertex shaders have no implicit LOD, so the texture() bias overload is
+	// unavailable under a core profile; sample an explicit mip with textureLod.
+	avglum = exp(textureLod(uMipmapID,vec2(0.5,0.5),20.0).a);
     vec3 tmpquad = vQUAD ;
     fUV = vec2(((tmpquad.x)+1.0f)/2.0f,((tmpquad.y)+1.0f)/2.0f ) ; // bunlar vertex pozisyonları .  
     gl_Position = vec4(tmpquad.xyz,1.0f);

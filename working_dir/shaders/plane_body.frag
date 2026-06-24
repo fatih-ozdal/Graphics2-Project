@@ -159,20 +159,20 @@ void main(void)
 
 			switch(texno){
 				case 0:{
-					texcolor = texture2D(Tsunset , sonnn );
+					texcolor = texture(Tsunset , sonnn );
 					break;
 				}
 				case 1:{
-					texcolor = texture2D(Tsky , sonnn );
+					texcolor = texture(Tsky , sonnn );
 					break;
 				}
 				case 2:{
-					texcolor = texture2D(Tchurch , sonnn );
+					texcolor = texture(Tchurch , sonnn );
 					break;
 				}
 				case 3:{
-					vec4 col1 = texture2D(Tsunset , sonnn );
-					vec4 col2 = texture2D(Tsky , sonnn );
+					vec4 col1 = texture(Tsunset , sonnn );
+					vec4 col2 = texture(Tsky , sonnn );
 					texcolor = mix(col1 , col2 , 0.5f );
 					break;
 				}case 4:{
@@ -182,7 +182,7 @@ void main(void)
 					break ; 
 				}
 				default:{
-					texcolor = texture2D(Tsunset , sonnn );
+					texcolor = texture(Tsunset , sonnn );
 					break;
 				}
 
@@ -208,14 +208,14 @@ void main(void)
 		// Vertex Normals. Normal axes by definition is between [-1, 1])
 		// Color is in between [0, 1]) so we adjust here for that
 		//case 1: fboColor = vec4((fNormal + 1) * 0.5, 1); break;
-		case 1: fboColor = texture2D(bAlbedo, fUV) ; break;
+		case 1: fboColor = texture(bAlbedo, fUV) ; break;
 		// UV
-		case 2: fboColor = texture2D(hAlbedo, fUV) ; break;
+		case 2: fboColor = texture(hAlbedo, fUV) ; break;
 		// Texture Mapping without shading.
 		case 3: fboColor = vec4(1); break;
 		// If mode is wrong, put pure white.
 		case 5:
-			fboColor = texture2D(Tsunset , fUV );
+			fboColor = texture(Tsunset , fUV );
 		default: fboColor = vec4(1); break;
 	}
 	break;

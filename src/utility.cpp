@@ -63,6 +63,9 @@ GLState::GLState(const char* const windowName,
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 4);
     glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_API);
+    // Pin a core profile so behavior is identical across drivers
+    // (no implicit compatibility-profile fallback).
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     // Set Debug Context for error reporting
     // Hopefully it will have minimal performance impact
     glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
