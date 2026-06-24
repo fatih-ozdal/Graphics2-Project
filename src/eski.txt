@@ -1,0 +1,952 @@
+#include <cstdio>
+#include <array>
+
+#include "utility.h"
+#include "thread_pool.h"
+
+#include <GLFW/glfw3.h>
+#include <glm/ext.hpp> // for matrix calculation
+
+#include <iostream>
+#include <vector>
+using namespace std;
+
+
+
+const int MyResHorizontal = 1280; // resolution x 
+const int MyResVertical = 720; // resolution y 
+float movespeed = 100.0f;
+
+struct Camera {
+    glm::vec3 pos = glm::vec3(0.0f, 1.0f, 0.0f);
+    glm::vec3 upvec = glm::vec3(0.0f, 1.0f, 0.0f); // y vectoz   X = Y x Z which  normalized olmak zorunda
+    glm::vec3 gaze = glm::vec3(0.0f, 0.0f, -1.0f); // - z vector normalized olmak zorunda.
+    glm::vec3 quarternions = glm::vec3(0.0f, 0.0f, 0.0f); // ihtiyaç duyabilirim bilmiyorum .
+
+    float screenwidth = 2560.0f;
+    float screenlength = 1444.0f;
+
+
+    float midx = screenwidth / 2.0f; // monitörün çözünürlüğü lazım bende bu çalıştı
+    float midy = screenlength / 2.0f; // monitörün çözünürlüğü lazım
+    float x_temp_mouse_diff;
+    float y_temp_mouse_diff;
+    float last_x;
+    float last_y;
+    glm::quat myoldquat = glm::quat(1, 0, 0, 0); // identity quarternionu
+    glm::quat mytempquat = glm::quat(1, 0, 0, 0);
+    float sensitivity_qe = 0.005f; // qe tuşlarının snesitvity ayarı
+    float sensitivity_mo_x = 1.0f ; // eskisi ------> 0.00002f * 2560;
+    float sensitivity_mo_y = 1.0f ;// eskisi ---> 0.00002f * 1444 * 1.3f;
+    int height_multiplier; // Y eksenleri bunla çarpılınca scale edilcek en az 1 
+    bool full_screen;
+    int newx;
+    int newy;
+}mycam;
+
+struct Plane {
+    glm::vec3 position;
+    glm::quat myoldquat = glm::quat(1, 0, 0, 0);
+    float speed;
+    glm::vec3 up;
+    glm::vec3 gaze;
+}myplane;
+
+struct PointLiht {
+    glm::vec3 position{ 1500.0f,1500.0f,200.0f };
+}mylight;
+
+
+
+struct Current_Inputs {
+    bool left_pressed = false; // NUMPAD -
+    bool right_pressed = false; //NUMPAD +
+    bool q_pressed = false;
+    bool e_pressed = false;
+    bool w_pressed = false;
+    bool a_pressed = false;
+    bool s_pressed = false;
+    bool d_pressed = false;
+    bool j_pressed = false; // BUNU DA altttakinden 
+    bool k_pressed = false; // bunları release olunca trueya çevirip kullanıldıktan sonra hemen geri false yapcam. 
+    bool LeftMouseclicked = false;
+    bool wireframeMode = false; // Bu ilk aktive edildiğinde 
+    bool enter_pressed = false;
+
+}myinputs;
+
+
+void WindowPositionCallback(GLFWwindow* wnd, int x, int y) // Bunu eğer pencere yeri değişirse kullancaz galiba ? 
+{
+    GLState& state = *static_cast<GLState*>(glfwGetWindowUserPointer(wnd));
+
+    state.curWndParams.pos[0] = x;
+    state.curWndParams.pos[1] = y;
+}
+
+void WindowSizeCallback(GLFWwindow* wnd, int x, int y)  // Bunu eğer pencere boyutu değişirse kullancaz galiba ? 
+{
+    GLState& state = *static_cast<GLState*>(glfwGetWindowUserPointer(wnd));
+    state.curWndParams.size[0] = x;
+    state.curWndParams.size[1] = y;
+}
+
+void MouseMoveCallback(GLFWwindow* wnd, double x, double y) // bunu glfwPollEvents() çağırıyo
+{
+    float nw_x = static_cast<float>(x);  // Bu fonksiyon x ekseninde mousun konumunu veriyo.
+    float nw_y = static_cast<float>(y);  // Bu fonksiyon y ekseninde mousun konumunu veriyo.
+    if (!myinputs.LeftMouseclicked) {
+        mycam.last_x = nw_x;
+        mycam.last_y = nw_y;
+        return;
+    }
+    GLState* state = static_cast<GLState*>(glfwGetWindowUserPointer(wnd)); // Pointerin lokasyonunu veriyor mu ?? 
+
+    mycam.x_temp_mouse_diff = (nw_x - mycam.last_x) / mycam.screenwidth; // son farkı veriyor x_de bunu kullanarak quart.
+    mycam.y_temp_mouse_diff = (nw_y - mycam.last_y) / mycam.screenlength; // son farkı veriyor y_de bunu kullanarak quart. Bunu kullancam quarternionlarla
+    // cameranın son passte olan farkı
+
+    mycam.last_x = nw_x;
+    mycam.last_y = nw_y;
+}
+
+void MouseButtonCallback(GLFWwindow* wnd, int button, int action, int) // bunu glfwPollEvents() çağırıyo
+{
+    if (button == GLFW_MOUSE_BUTTON_LEFT) {
+        if (action == GLFW_PRESS) {
+            myinputs.LeftMouseclicked = true;
+        }
+        else {
+            myinputs.LeftMouseclicked = false;
+        }
+    }
+}
+
+void MouseScrollCallback(GLFWwindow* wnd, double dx, double dy) // bunu 
+{
+}
+
+void FramebufferChangeCallback(GLFWwindow* wnd, int w, int h)
+{
+    GLState& state = *static_cast<GLState*>(glfwGetWindowUserPointer(wnd));
+    state.curWndParams.fbSize[0] = w;
+    state.curWndParams.fbSize[1] = h;
+}
+
+void KeyboardCallback(GLFWwindow* wnd, int key, int scancode, int action, int modifier)
+{
+    // wasd baslı konumda ise true değilse false oluyor. Diğerleri releaseda mod değiştirmeli
+    if (key == GLFW_KEY_W) {
+        if (action == GLFW_PRESS) {
+            myinputs.w_pressed = true;
+        }
+        else if (action == GLFW_RELEASE) {
+            myinputs.w_pressed = false;
+        }
+    }
+
+    if (key == GLFW_KEY_A) {
+        if (action == GLFW_PRESS) {
+            myinputs.a_pressed = true;
+        }
+        else if (action == GLFW_RELEASE) {
+            myinputs.a_pressed = false;
+        }
+    }
+    if (key == GLFW_KEY_ENTER) {
+        if (action == GLFW_PRESS) {
+            myinputs.enter_pressed = true;
+        }
+    }
+
+    if (key == GLFW_KEY_S) {
+        if (action == GLFW_PRESS) {
+            myinputs.s_pressed = true;
+        }
+        else if (action == GLFW_RELEASE) {
+            myinputs.s_pressed = false;
+        }
+    }
+
+    if (key == GLFW_KEY_D) {
+        if (action == GLFW_PRESS) {
+            myinputs.d_pressed = true;
+        }
+        else if (action == GLFW_RELEASE) {
+            myinputs.d_pressed = false;
+        }
+    }
+
+    if (key == GLFW_KEY_Q) {
+        if (action == GLFW_PRESS) {
+            myinputs.q_pressed = true;
+        }
+        else if (action == GLFW_RELEASE) {
+            myinputs.q_pressed = false;
+        }
+    }
+
+    if (key == GLFW_KEY_E) {
+        if (action == GLFW_PRESS) {
+            myinputs.e_pressed = true;
+        }
+        else if (action == GLFW_RELEASE) {
+            myinputs.e_pressed = false;
+        }
+    }
+
+    if (key == GLFW_KEY_RIGHT) {
+        if (action == GLFW_RELEASE) {
+            myinputs.right_pressed = true;
+        }
+    }
+    if (key == GLFW_KEY_LEFT) {
+        if (action == GLFW_RELEASE) {
+            myinputs.left_pressed = true;
+        }
+    }
+    if (key == GLFW_KEY_L) {
+        if (action == GLFW_RELEASE) {
+            myinputs.wireframeMode = !myinputs.wireframeMode;
+        }
+    }
+    if (key == GLFW_KEY_J) {
+        if (action == GLFW_RELEASE) {
+            myinputs.j_pressed = true;
+        }
+    }
+    if (key == GLFW_KEY_K) {
+        if (action == GLFW_RELEASE) {
+            myinputs.k_pressed = true;
+        }
+    }
+
+    GLState& state = *static_cast<GLState*>(glfwGetWindowUserPointer(wnd));
+    uint32_t mode = state.mode;
+
+    if (action != GLFW_RELEASE) return; // bundan altına mod değişimlerini koycam üstü w a s d olacak.  
+    if (key == GLFW_KEY_P) mode = (mode == 2) ? 0 : (mode + 1); // bunlar zaten hali hazırda tanımlı
+    if (key == GLFW_KEY_O) mode = (mode == 0) ? 2 : (mode - 1);
+
+    state.mode = mode;
+}
+
+int main(int argc, const char* argv[])
+{
+
+
+
+
+    string path;
+    char buffer[20];
+    if (argc > 1) {
+        path = argv[1];
+    }
+    else {
+        path = "geo/n36_e029_1arc_v3.dt2";
+    }
+
+    GeoDataDTED mygeodata = GeoDataDTED(path);
+
+    double latmin = mygeodata.latRange.x;
+    double latmax = mygeodata.latRange.y;
+    double lonmin = mygeodata.lonRange.x;
+    double lonmax = mygeodata.lonRange.y;
+    float minheight1 = mygeodata.minMax.x; // tüm verideki en büyük height
+    float maxheight1 = mygeodata.minMax.y; // tüm verideki en küçük height
+    int no_og_columns = mygeodata.dimensions.x; // kaç tane x ekseninde elevation noktamız var onu veriyo
+    int no_of_rows = mygeodata.dimensions.y;  // kaç tane y ekseninde elevation noktamız var point olarak çıkarabileceğimiz onu veriyor.
+
+
+    std::cout << mygeodata(1800, 1800) << endl; // bununla x, y arrayindeki height değerini alıyoruz. (0,0) NorthWeste karşılık geliyor galiba
+    // burdaki her bir gridi 
+
+    int no_of_xdim_in_data = mygeodata.dimensions.x;
+    int no_of_ydim_in_data = mygeodata.dimensions.y;
+
+
+    int no_of_control_matrices_x_axis = (no_of_xdim_in_data - 3); // bunlar X ekseni boyunca kaç fakrlı kontrol norkası verito
+    // NOT BEN BURDA B-SPLINE KONTROL NOKTALARINI 1 2 3 4 / 4 5 6 7 / 7 8 9 10 diye gidecek şekilde kullanmıştım ama bir bir ilerlemek gerekiyo conneted bir region olması için
+    // Benim her bir sütün/satır için bir bir eklemem gerekiyo ama ben tek bir satırı tutup kalan satırları yeni eklemişim oyle devamlılığı bozuk geldi 
+    int no_of_control_matrices_y_axis = (no_of_ydim_in_data - 3); // bunlar Y ekseni boyunca kaç farklı kontrol noktası çıkarılacağını veriyor
+
+
+    // Her bir enlem yaklaşık 110 km boylam da türkiyede 80 km galiba. İkisinin arası 100 kmyi hem enlem hem boylam için kabul edebiliriz.
+    // Yani (latmax-latmin)*100*1000 metre x ekseninde alacağız (longmax-longmin)*100*1000 metre de y ekseninde alacağız.
+    // Bu verilerde dimension başına ne kadar mesafe düştüğü dim*x = (latmax-latmin)*100*1000 denklemiyle gelecek. x ile scale edeceğiz
+
+    float x_scale = (latmax - latmin) * 100000 / no_of_control_matrices_x_axis; // bunlar 
+    // x_scale = 1.0f;
+    float y_scale = (lonmax - lonmin) * 100000 / no_of_control_matrices_y_axis;
+
+    vector<glm::mat4> ZxMatrices; // x sağa doğru artıyor
+    vector<glm::mat4> ZyMatrices; // y aşağı doğru artıyor
+
+    glm::mat4 temp2;
+
+
+    glm::vec4 myvec11 = { 0.0f, 1.0f, 2.0f, 3.0f }; // x bu matris 3
+    temp2 = { myvec11,myvec11,myvec11,myvec11 }; // bu Zy matrisi ,  en üst row 0 sonra 1  .. diye gidiyo.
+    ZxMatrices.push_back(glm::transpose(temp2));
+    ZyMatrices.push_back(temp2); // Bu matris en batıda başlıyor en doğuya kadar gidiyo no_of_control_matrices_x_axis kadar
+
+
+
+    // her bir x ve y değeri için bir height değeri var. bunlar kontrol noktası sayısı bu kadar kontrol nokotasından (k-1)/3 kadar x bölgesi üretilir. 
+    // Zznin dimensionu hem x hem de ydekii bütün kontrol matrislerin sayısının çarpımı kadar.
+    // Yani her 4 kontrol pointe 
+
+    vector<glm::mat4> ZzMatrices(no_of_control_matrices_x_axis * no_of_control_matrices_y_axis); // Memory allocation
+
+    size_t THREAD = no_of_control_matrices_x_axis;
+    // BUNLAR LOOPUN İÇİNDE DECLARE EDİLMEZSE RACE CONDITION OLUYOR MULTITHEADING YAPILAMIYOR
+    ThreadPool tp({ .threadCount = std::thread::hardware_concurrency() });
+    tp.SubmitDetachedBlocks(THREAD, [&](uint32_t start, uint32_t end)
+        {
+            for (int x = start; x < end; x++) {
+                for (int y = 0; y < no_of_control_matrices_y_axis; y++) {
+
+                    // allta Zx ve Zy matrisleri için hesaplama var bence gereği yok tek matrisle halledilir.
+                    /* // bunun altı gerekli olmayabilir çünkü s ve tyi ona göre ayarlarım zaten işlem kalabalığı olmasın
+                    myvec1={ 3*y,3*y+1,3*y+2,3*y+3 }; // x
+                    myvec2={ 3*x,3*x,3*x,3*x };
+                    myvec3={ 3*x+1,3*x+1,3*x+1,3*x+1 };
+                    myvec4={ 3*x+2,3*x+2,3*x+2,3*x+2 };
+                    myvec5={ 3*x+3,3*x+3,3*x+3,3*x+3 }; // her bir vektör bir columnu temsil ediyor.
+                    temp1={myvec1,myvec1,myvec1,myvec1};
+                    temp2={ myvec2,myvec3,myvec4,myvec5 };
+                    ZxMatrices.push_back(temp2); // Bu matris en batıda başlıyor en doğuya kadar gidiyo no_of_control_matrices_x_axis kadar
+                    ZyMatrices.push_back(temp1); // bu matris kuzeyden güneye
+                    */
+                    glm::vec4 myvec1 = { mygeodata(x,y),mygeodata(x,y + 1),mygeodata(x,y + 2),mygeodata(x,y + 3) }; // q(s,t) de x s kabul ediliyor. Sağa doğru artıyo. y aşağı doğru artıyo t olarak alıyoruz
+                    glm::vec4 myvec2 = { mygeodata(x + 1, y),mygeodata(x + 1,y + 1),mygeodata(x + 1,y + 2),mygeodata(x + 1,y + 3) };
+                    glm::vec4 myvec3 = { mygeodata(x + 2, y),mygeodata(x + 2,y + 1),mygeodata(x + 2,y + 2),mygeodata(x + 2,y + 3) };
+                    glm::vec4 myvec4 = { mygeodata(x + 3, y),mygeodata(x + 3,y + 1),mygeodata(x + 3,y + 2),mygeodata(x + 3,y + 3) }; // bunlar column olarak içeri geçiyor
+                    glm::mat4 temp1 = { myvec1,myvec2,myvec3,myvec4 };
+                    ZzMatrices[y + x * no_of_control_matrices_y_axis] = (temp1 / x_scale); // zyi scale ettik
+                }
+            }
+        });
+    tp.Wait();
+    // Zz Matrixte x solda y sağda artıyor. erşirken ZZ(x*no_of_x+y) şeklinde matrise erişiyoruz
+
+
+
+
+
+    glm::mat4 B_splineMatrix;
+    glm::mat4 B_splineMatrix_Transform;
+
+    glm::vec4 myvec12 = { -1.0f / 6.0f,3.0f / 6.0f,-3.0f / 6.0f,1.0f / 6.0f }; // bu bölümlerin float olması gerekiyo
+    glm::vec4 myvec22 = { 1.0f / 2.0f,-1.0f,0.0f,4.0f / 6.0f };
+    glm::vec4 myvec32 = { -3.0f / 6.0f,3.0f / 6.0f,3.0f / 6.0f,1.0f / 6.0f };
+    glm::vec4 myvec42 = { 1.0f / 6.0f,0.0f,0.0f,0.0f };
+    B_splineMatrix = { myvec12,myvec22,myvec32,myvec42 };
+    B_splineMatrix_Transform = glm::transpose(B_splineMatrix);
+
+    // kendimi hareket ettirmek yerine objeleri  hareket ettirebilirim 
+
+
+
+    // Başlangıç kamera ayarlarını buraya koydum
+
+
+
+    float current_time = 0;
+    float last_time = 0;
+    float diff = 0;
+    float speed;
+    glm::vec3 desired_normal;
+    glm::vec3 current_normal;
+
+
+    mycam.pos = { 1136.12f,26.7833f,1191.91f };
+    mycam.height_multiplier = 1;
+    mycam.full_screen = true;
+
+
+
+
+
+
+    glm::quat worldquat;
+    glm::quat quat_temp;
+
+    // alta goto ile gelicem 
+    int tesellation_rate = 1; // rate + 1 tane nokta var  
+
+    GLState state = GLState("Terrain Renderer", MyResHorizontal, MyResVertical,
+        CallbackPointersGLFW()); // Bunu yukarı almak gerekiyomuş
+
+
+
+
+
+    ThreadPool tp2({ .threadCount = std::thread::hardware_concurrency() });
+
+
+    ShaderGL vShader = ShaderGL(ShaderGL::VERTEX, "shaders/generic.vert");
+    ShaderGL fShader = ShaderGL(ShaderGL::FRAGMENT, "shaders/debug.frag");
+    MeshGL mesh = MeshGL("meshes/tri.obj");
+    TextureGL tex = TextureGL("textures/mixed_brick_wall_diff_1k.png",
+        TextureGL::LINEAR, TextureGL::REPEAT);
+
+
+BURAYA: // YENİ TESELLATİON RATE GELDİ KALAN HER ŞEY AYNI
+
+
+    unsigned int myebo, vertexBuffer, normalBuffer, myVAO;
+    glGenVertexArrays(1, &myVAO);
+    glGenBuffers(1, &vertexBuffer);
+    glGenBuffers(1, &myebo);
+    glGenBuffers(1, &normalBuffer);
+
+
+    std::cout << "tesellation rate-" << tesellation_rate + 1 << endl;
+
+
+    // burdan aşağısı tesellation
+
+    glm::vec4 S_Matrix;
+    glm::vec4 T_Matrix;
+
+
+    vector<glm::vec4> ST_Matrices; // 0 indexindeki matrix s=0 olacak en sondaki ise s=1 
+    ST_Matrices.clear();
+
+    vector<glm::vec4> ST_Matrices_derivatives;
+    ST_Matrices_derivatives.clear(); // Bütün arayları goto için clearlıyorum
+
+    // alttaki st matrisini dolduro en 0'da s=0 için olan hesaplama var en son ise s=1'e kadar gidiyo.
+    for (int l = 0; l <= tesellation_rate; l++) {
+        float mytmpp = 1.0;
+        mytmpp = (mytmpp / tesellation_rate) * l;
+        S_Matrix = { mytmpp * mytmpp * mytmpp , mytmpp * mytmpp ,mytmpp ,1 };
+        ST_Matrices.push_back(S_Matrix);
+        S_Matrix = { 3 * mytmpp * mytmpp , 2 * mytmpp  ,1 ,0 };
+        ST_Matrices_derivatives.push_back(S_Matrix); // bu s'in derivative olan kısmı 3s^2 2s 1 0 gibi
+    }
+
+
+
+    float QxTmp;
+    vector<vector<float>> QxStore;// bunda x'e göre önce xler artıyor y'nin bir artması tüm xleri kaydırıyor. Yani sol s sağ t 
+    QxStore.clear();
+
+    vector<vector<float>> QxdtStore;
+    QxdtStore.clear();
+
+    vector<vector<float>> QxdsStore;
+    QxdsStore.clear();
+
+    vector<float> tmpvecc34;
+    vector<float> tempvecc38;
+    vector<float> tempvecc39;
+    glm::mat4 yeterartik;
+    for (int m = 0; m <= tesellation_rate; m++) {
+        tmpvecc34.clear();
+        tempvecc38.clear();
+        tempvecc39.clear();
+        for (int n = 0; n <= tesellation_rate; n++) {
+            yeterartik = (B_splineMatrix * ZxMatrices[0] * B_splineMatrix_Transform);
+            QxTmp = glm::dot(ST_Matrices[m], yeterartik * ST_Matrices[n]);
+            tmpvecc34.push_back(QxTmp);
+            QxTmp = glm::dot(ST_Matrices_derivatives[m], yeterartik * ST_Matrices[n]);
+            tempvecc38.push_back(QxTmp);
+            QxTmp = glm::dot(ST_Matrices[m], yeterartik * ST_Matrices_derivatives[n]); // tye göre türev x için
+            tempvecc39.push_back(QxTmp);
+        }
+        QxStore.push_back(tmpvecc34);
+        QxdsStore.push_back(tempvecc38);
+        QxdtStore.push_back(tempvecc39);
+    } // bu döngü QxyStore'da X ve Y için gerekli yüzey bilgilerini tutuyor S sol T sağgdaki her bir s ve t için. Bunlar için ayrı dönmeye gerek yok.
+    // Şu an Qy ve Q1'te Qx(0,0) dan Qx(1,1)'e kadar belli ve her aralıkta aynı. Aynı şekilde her bir aralık için QZ hesaplayıp ondan çekmek gerekiyo
+
+
+
+
+
+    // yukarıdakinin aynınsı ama y  için
+    float QyTmp = glm::dot(S_Matrix, (B_splineMatrix * ZyMatrices[0] * B_splineMatrix_Transform * S_Matrix));
+    vector<vector<float>> QyStore;// bunda x'e göre önce xler artıyor y'nin bir artması tüm xleri kaydırıyor. Yani sol s sağ t 
+    QyStore.clear();
+    vector<vector<float>> QydtStore;
+    QydtStore.clear();
+    vector<vector<float>> QydsStore;
+    QydsStore.clear();
+
+    glm::mat4 yeterartik1;
+    vector<float> tmpvecc35;
+    vector<float> tmpvecc36;
+    vector<float> tmpvecc37;
+    for (int m = 0; m <= tesellation_rate; m++) {
+        tmpvecc35.clear();
+        tmpvecc36.clear();
+        tmpvecc37.clear();
+        for (int n = 0; n <= tesellation_rate; n++) {
+            yeterartik1 = (B_splineMatrix * ZyMatrices[0] * B_splineMatrix_Transform);
+            QyTmp = glm::dot(ST_Matrices[m], yeterartik1 * ST_Matrices[n]);
+            tmpvecc35.push_back(QyTmp);
+
+            QyTmp = glm::dot(ST_Matrices_derivatives[m], yeterartik1 * ST_Matrices[n]); // s e göre türev
+            tmpvecc36.push_back(QyTmp);
+            QyTmp = glm::dot(ST_Matrices[m], yeterartik1 * ST_Matrices_derivatives[n]); // tye göre türev y
+            tmpvecc37.push_back(QyTmp);
+
+        }
+        QyStore.push_back(tmpvecc35);
+        QydsStore.push_back(tmpvecc36);
+        QydtStore.push_back(tmpvecc37); // artık türevler tutuluyor sadece zde lazım
+    } // bu döngü QxyStore'da X ve Y için gerekli yüzey bilgilerini tutuyor S sol T sağgdaki her bir s ve t için. Bunlar için ayrı dönmeye gerek yok.
+    // Şu an Qy ve Q1'te Qx(0,0) dan Qx(1,1)'e kadar belli ve her aralıkta aynı. Aynı şekilde her bir aralık için QZ hesaplayıp ondan çekmek gerekiyo
+
+
+
+
+    vector<unsigned int> MyIndexBuffer(no_of_control_matrices_x_axis * no_of_control_matrices_y_axis * (tesellation_rate)
+        * (tesellation_rate) * 6);
+
+
+
+
+
+    int total_vertices = no_of_control_matrices_x_axis * no_of_control_matrices_y_axis * (tesellation_rate + 1) * (tesellation_rate + 1);
+
+
+    vector<glm::vec3> MyVertexBuffer(total_vertices); // x y z şeklinde depoluyor.
+
+
+    vector<glm::vec3> MyNormalBuffer(total_vertices); // x y z şeklinde depoluyor. Bu normaller için
+
+
+
+
+
+
+    float temps;
+    float tempt;
+
+    float derivative_s_x, derivative_s_y, derivative_s_z, derivative_t_x, derivative_t_y, derivative_t_z;
+
+    int tesplus = (tesellation_rate + 1);
+
+
+    tp2.SubmitDetachedBlocks(no_of_control_matrices_x_axis, [&](uint32_t start1, uint32_t end1)
+        {
+            for (uint32_t x = start1; x < end1; x++) {
+                for (int y = 0; y < no_of_control_matrices_y_axis; y++) {
+
+                    // her bir x ve y kontrol bölgesi için birer bir z değeri var 2d düzlemde düşünürsek. Bu düzlemdeki değerleri Üçgenlere çevirmek gerekiyor.
+         //  her bir Surface bölgesi için tes_rate 1 ise bu bölgede 4 vertex var. Yani her bir bölge için tes_rate+1 kadar yatay ve dikeyde dönüyoruz
+
+                    glm::mat4 MyTempMatrix = B_splineMatrix * ZzMatrices[x * no_of_control_matrices_y_axis + y] * B_splineMatrix_Transform;
+                    for (int a = 0; a <= tesellation_rate; a++) {
+                        for (int b = 0; b <= tesellation_rate; b++) {
+
+                            int indexx1 = x * no_of_control_matrices_y_axis * tesplus * tesplus
+                                + y * tesplus * tesplus + a * tesplus + b;
+                            // her bir bölgede s ve t için 1 ve 0 değerleri arasında birer vertex atayacağım. Ayrıca vertex değerleri Qy ve Qx için toplanmalı.
+                            float tmpforgivenxy_z = glm::dot(ST_Matrices[a], (MyTempMatrix * ST_Matrices[b]));
+                            MyVertexBuffer[indexx1] = { QxStore[a][b] + x,tmpforgivenxy_z,QyStore[a][b] + y }; //1.0f yerine Qz degeri gelmli
+                            // daha başka bufferlar da eklenmesi gerekiyor normal gibi
+                            // normalleri 
+                            float QZds = glm::dot(ST_Matrices_derivatives[a], (MyTempMatrix * ST_Matrices[b]));
+                            float QZdt = glm::dot(ST_Matrices[a], (MyTempMatrix * ST_Matrices_derivatives[b]));
+
+                            glm::vec3 tr_maci_kacti = { QZdt * QydsStore[a][b] - QZds * QydtStore[a][b], QxdsStore[a][b] * QydtStore[a][b] - QxdtStore[a][b] * QydsStore[a][b],QZds * QxdtStore[a][b] - QZdt * QxdsStore[a][b] };
+                            MyNormalBuffer[indexx1] = (-glm::normalize(tr_maci_kacti));
+
+                        }
+                    }
+                    int current_vertex_pos = (tesellation_rate + 1) * (tesellation_rate + 1) * x * no_of_control_matrices_y_axis + (tesellation_rate + 1) * (tesellation_rate + 1) * y;
+                    // MyVertexBuffer Önce b'leri artırıyo sonra a ları dönüyo yani a da bir sonrakine geçmek için a*tesellaion rate skiplicem.
+                    // bu loop Element Object Buffer Yollamak için
+                    int indexx12 = (x * no_of_control_matrices_y_axis * tesellation_rate * tesellation_rate + y * tesellation_rate * tesellation_rate) * 6;
+                    for (int a = 0; a < tesellation_rate; a++) {
+                        for (int b = 0; b < tesellation_rate; b++) {
+                            // Tesellation bölgesi için 4lü oluşturduk
+
+
+                            // Burda her bir Surface bölgesi için tes_rate 1 ise bu bölgede 4 vertex var. Yani her bir bölge için tes_rate+1 kadar yatay ve dikeyde dönüyoruz
+                            unsigned int top_left = current_vertex_pos + (a * tesplus) + b;
+                            unsigned int top_right = current_vertex_pos + (a * tesplus) + (b + 1);
+                            unsigned int bottom_left = current_vertex_pos + ((a + 1) * tesplus) + b;
+                            unsigned int bottom_right = current_vertex_pos + ((a + 1) * tesplus) + (b + 1);
+
+                            // Üçgen 1
+                            MyIndexBuffer[indexx12++] = (top_left);
+                            MyIndexBuffer[indexx12++] = (bottom_left);
+                            MyIndexBuffer[indexx12++] = (top_right);
+
+                            // üçgen 2
+                            MyIndexBuffer[indexx12++] = (top_right);
+                            MyIndexBuffer[indexx12++] = (bottom_left);
+                            MyIndexBuffer[indexx12++] = (bottom_right);
+                        }
+                    }
+
+
+
+
+
+
+
+
+
+                }
+            }
+
+
+        });
+    tp2.Wait();
+
+
+    // buraya kadar tesellate ettim sonrasıda fonksiyona dönüşmesi gerekiyor. 
+
+
+
+    std::cout << "Buraya geldik" << std::endl;
+    std::cout << mygeodata.dimensions.x << " xdimension" << std::endl;
+    std::cout << mygeodata.dimensions.y << " ydimension" << std::endl;
+    std::cout << mygeodata.heightValues.size() << " height_dim" << std::endl;
+    std::cout << ZzMatrices.size() << endl;
+    std::cout << "Start Rendering";
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    // NOT: GENERATE BUFFER VE VAO FONKSIYONLARI YUKARI GITTI BURAYANIN USTUNE
+    // unsigned int myebo;
+    // glGenBuffers(1, &myebo);
+    // bundan aşağısı layout 4E  bizim vertexi bağlıyor
+    // unsigned int vertexBuffer, myVAO  ;
+    // glGenVertexArrays(1, & myVAO); // myVAO intine bir sayı atandı bu artık VAO'muzu temsil edecek soldaki parametre bunun sayısının 1 olduğunu veriyo 
+    // glGenBuffers(1,&vertexBuffer); // Buffer için de bir sayı aldık. bu forkda döndüğü pid gibi bir id aslında
+    glBindVertexArray(myVAO); // Şu an bu VAO aktif buna yazacağız 
+    glEnableVertexAttribArray(4); // vertex shaderdaki 4üncü layout pozisyonunu aktive ettik. 
+    glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
+    glBufferData(GL_ARRAY_BUFFER, MyVertexBuffer.size() * sizeof(glm::vec3), MyVertexBuffer.data(), GL_STATIC_DRAW); //eboda 4 nokta verirsen kendisi üçken yapıyo Bu düze GL_ARRAY_BUFFER
+    glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0); // en sağdaki offset en soldaki layout=4 veri başına 3 array
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, myebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, MyIndexBuffer.size() * sizeof(unsigned int), MyIndexBuffer.data(), GL_STATIC_DRAW);
+    //glEnablevertex..(4) dediğim için ebo ona attachlenmem gerektiğini biliyo
+
+    /*
+    unsigned int normalBuffer;
+    glGenBuffers(1,&normalBuffer); // Burdan aşağısını BURAYA dan yukarı alcam tesellation için
+    */
+    glBindVertexArray(myVAO);
+
+
+    glad_glEnableVertexAttribArray(5);
+    glBindBuffer(GL_ARRAY_BUFFER, normalBuffer);
+    glBufferData(GL_ARRAY_BUFFER, MyNormalBuffer.size() * sizeof(glm::vec3), MyNormalBuffer.data(), GL_STATIC_DRAW); // Bu gpuya yolluyo veriyi
+    glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+
+
+    // Set unchanged state(s)
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f); //  Arka Planı opak Yaptı
+    glEnable(GL_DEPTH_TEST);
+    glFrontFace(GL_CCW);
+
+    // =============== //
+    //   RENDER LOOP   //
+    // =============== //
+
+
+
+    int windowwidth;
+    int windowheight;
+
+    const GLFWvidmode* mode = glfwGetVideoMode(glfwGetPrimaryMonitor());
+    windowwidth = mode->width; // bu 2560 nedense ters veriyo
+    windowheight = mode->height;  // Bu 1600
+
+    mycam.midx = windowwidth / 2.0f;
+    mycam.midy = windowheight / 2.0f;
+
+    mycam.last_x = mycam.midx;
+    mycam.last_y = mycam.midy;
+    mycam.screenlength = windowheight * 3 / 4;
+    mycam.screenwidth = windowwidth * 3 / 4;
+
+    mycam.full_screen = !mycam.full_screen;
+
+    glfwSetWindowMonitor(state.window, NULL, windowwidth / 8, windowheight / 8, 7 * (windowwidth / 8), 7 * (windowheight / 8), 0);
+
+    while (!glfwWindowShouldClose(state.window))
+    {
+
+
+
+
+        // Poll inputs from the OS via GLFW
+        glfwPollEvents();
+        // bundan sonra kamerayı güncelliyorum.
+        current_time = static_cast<float>(glfwGetTime());
+        diff = current_time - last_time;
+        last_time = current_time; // updateledim time
+        // aşağıda wasd ve angle'a göre camera pozisyonunda değişim var 
+        speed = diff * movespeed;
+
+        glm::quat rollquat(1, 0, 0, 0);
+        glm::quat yawquat(1, 0, 0, 0);
+        glm::quat pitchquat(1, 0, 0, 0);
+        glm::quat finalquat(1, 0, 0, 0);
+        quat_temp = mycam.myoldquat; //eski quatım
+        if (myinputs.q_pressed && myinputs.e_pressed) { // roll caseleri
+            // bunu salla birbirini cancellar
+        }
+        else if (myinputs.e_pressed) {
+            worldquat = quat_temp * glm::quat(0, 0, 0, -1) * glm::inverse(quat_temp); // temp şu an WorldRolla eşit
+            worldquat = glm::normalize(worldquat);
+            float sint = sin(mycam.sensitivity_qe);
+            float cost = cos(mycam.sensitivity_qe);
+            rollquat = glm::quat(cost, sint * worldquat.x, sint * worldquat.y, sint * worldquat.z); // bu şu an roll quarternionu. 
+
+
+
+
+        }
+        else if (myinputs.q_pressed) {
+
+
+            worldquat = quat_temp * glm::quat(0, 0, 0, -1) * glm::inverse(quat_temp); // temp şu an WorldRolla eşit
+            worldquat = glm::normalize(worldquat);
+            float sint = sin(-mycam.sensitivity_qe);
+            float cost = cos(-mycam.sensitivity_qe); // bunda angle negatif tek farkı bu 
+            rollquat = glm::quat(cost, sint * worldquat.x, sint * worldquat.y, sint * worldquat.z); // bu şu an roll quarternionu. 
+
+
+
+
+
+
+        }
+        if (myinputs.LeftMouseclicked) {
+
+            worldquat = quat_temp * glm::quat(0, 0, 1, 0) * glm::inverse(quat_temp); // temp şu an Worldway eşit
+            worldquat = glm::normalize(worldquat);
+
+            float yawAngle = mycam.x_temp_mouse_diff * mycam.sensitivity_mo_x;
+            float sint = sin(-yawAngle / 2.0f);
+            float cost = cos(-yawAngle / 2.0f);
+            yawquat = glm::quat(cost, sint * worldquat.x, sint * worldquat.y, sint * worldquat.z); // bu şu an yaw quarternionu. 
+
+
+            worldquat = quat_temp * glm::quat(0, 1, 0, 0) * glm::inverse(quat_temp); // orjinden geçiyo
+            worldquat = glm::normalize(worldquat);
+
+            yawAngle = mycam.y_temp_mouse_diff * mycam.sensitivity_mo_y;
+            sint = sin(-yawAngle / 2.0f); // 4x'e göre
+            cost = cos(-yawAngle / 2.0f); // bunda angle negatif tek farkı bu 
+            pitchquat = glm::quat(cost, sint * worldquat.x, sint * worldquat.y, sint * worldquat.z); // mouse yukardaysa yukarı gitmesini istedim yani cvv tersine negatif olmalı
+            mycam.x_temp_mouse_diff = 0.0f;
+            mycam.y_temp_mouse_diff = 0.0f;
+        }
+        finalquat = rollquat * yawquat * pitchquat;
+        finalquat = glm::normalize(finalquat);
+        mycam.myoldquat = finalquat * mycam.myoldquat;
+
+        mycam.gaze = finalquat * (mycam.gaze);
+        mycam.upvec = finalquat * mycam.upvec;
+
+
+
+
+
+
+
+        if (myinputs.w_pressed) {
+            mycam.pos += (mycam.gaze) * speed;
+        }
+        if (myinputs.s_pressed) {
+            mycam.pos -= (mycam.gaze) * speed;
+        }
+        if (myinputs.d_pressed) { // a ve d yanlış dönüş yapması gerekiyo bunların 
+            mycam.pos += glm::normalize(glm::cross(mycam.upvec, -mycam.gaze)) * speed; // bu yanlış olabilir
+        }
+        if (myinputs.a_pressed) {
+            mycam.pos -= glm::normalize(glm::cross(mycam.upvec, -mycam.gaze)) * speed; // bu yanılş olabilir.
+
+        }
+        if (myinputs.left_pressed && mycam.height_multiplier > 1) { // BUNLAR MOUSEPAD YERİNE sağ ok tuşu artırır sol azaltır. Y eksenini daha fazla scale ediyo
+            myinputs.left_pressed = false;
+            mycam.height_multiplier = mycam.height_multiplier >> 1; // Shift ediyorum ilk başlangıcı gerçeğe en yakın anı 
+        }
+        myinputs.left_pressed = false;
+        if (myinputs.right_pressed && mycam.height_multiplier < 129) {
+            myinputs.right_pressed = false;
+            mycam.height_multiplier = mycam.height_multiplier << 1;
+        }
+        myinputs.right_pressed = false;
+        if (myinputs.j_pressed && tesellation_rate > 1) { // tesellation rate 1 den büyükse küçültüye j ye basınca
+            tesellation_rate--;
+            myinputs.j_pressed = false;
+
+            glDeleteVertexArrays(1, &myVAO);
+            glDeleteBuffers(1, &vertexBuffer);
+            glDeleteBuffers(1, &normalBuffer);
+            glDeleteBuffers(1, &myebo);
+
+            goto BURAYA;
+        }
+        else if (myinputs.k_pressed && tesellation_rate < 3) { // tesellation rate 3 den küçükse büyültüyo
+            tesellation_rate++;
+            myinputs.k_pressed = false;
+
+            glDeleteVertexArrays(1, &myVAO);
+            glDeleteBuffers(1, &vertexBuffer);
+            glDeleteBuffers(1, &normalBuffer);  // Eski buffer objectleri sildim yer kaplamaması için 
+            glDeleteBuffers(1, &myebo);
+
+            goto BURAYA;
+
+        }
+        if (myinputs.enter_pressed) {
+            myinputs.enter_pressed = false;
+            mycam.full_screen = !mycam.full_screen;
+            if (!mycam.full_screen) { // fullden aşağı geç
+
+                mycam.screenlength = windowheight * 3 / 4;
+                mycam.screenwidth = windowwidth * 3 / 4;
+
+
+
+
+                glfwSetWindowMonitor(state.window, NULL, windowwidth / 8, windowheight / 8, 7 * (windowwidth / 8), 7 * (windowheight / 8), 0);
+            }
+            else { // fule geç
+
+
+                mycam.screenlength = windowheight;
+                mycam.screenwidth = windowwidth;
+
+
+                glfwSetWindowMonitor(state.window, NULL, 0, 0, windowwidth, windowheight, 0);
+            }
+
+        }
+
+
+
+        // Object-common matrices
+        float aspectRatio = float(state.curWndParams.fbSize[0]) / float(state.curWndParams.fbSize[1]);
+
+
+        glm::mat4x4 proj = glm::perspective(glm::radians(60.0f), aspectRatio,
+            0.5f, 5000.0f); // bu projection matrisi  near plani uzaklaştırıcam ki daha az yer göreyim gerçekçi olsun
+        //state.cam.pos = mycam.pos;
+        state.cam.gaze = state.cam.pos + mycam.gaze;
+        state.cam.up = mycam.upvec;  // Bunları model matrislerine vereceğim floatın 0a yakın kalmasını sağlamak için
+
+        glm::mat4x4 view = glm::lookAt(state.cam.pos, state.cam.gaze, state.cam.up); // bunu vertex shadere viewport transform olarak paslıyoz.
+
+
+        std::cout << "\rCamera Pos - X: " << mycam.pos.x
+            << " Y: " << mycam.pos.y
+            << " Z: " << mycam.pos.z << std::flush;
+
+
+
+        // Start rendering
+        glViewport(0, 0,
+            state.curWndParams.fbSize[0],
+            state.curWndParams.fbSize[1]);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); // color bufferi ve depth bufferi temizledi
+        glEnable(GL_CULL_FACE);
+
+        // Bind shaders and related uniforms / textures
+        // Move this somewhere proper later.
+        // These must match the uniform "location" at the shader(s).
+        // Vertex
+        static constexpr GLuint U_TRANSFORM_MODEL = 0;
+        static constexpr GLuint U_TRANSFORM_VIEW = 1;
+        static constexpr GLuint U_TRANSFORM_PROJ = 2;
+        static constexpr GLuint U_TRANSFORM_NORMAL = 3;
+        static constexpr GLuint U_LIGHT_POS = 4;
+        // Fragment
+        static constexpr GLuint T_ALBEDO = 0;
+        static constexpr GLuint U_MODE = 0;
+
+        static float maxheight = maxheight1 / x_scale; // bunları scale ettik
+        static float minheight = minheight1 / x_scale;
+
+
+
+        glm::vec3 point123 = mylight.position + mycam.pos; // bunlar tüm vertexler için aynı olacağından dışarı aldım.
+
+        // glActiveShaderProgram makes "glUniform" family of commands
+        // to effect the selected shader
+        glUseProgramStages(state.renderPipeline, GL_VERTEX_SHADER_BIT, vShader.shaderId);
+        glActiveShaderProgram(state.renderPipeline, vShader.shaderId);
+        {
+            // Don't move the triangle
+            glm::mat4x4 model = glm::identity<glm::mat4x4>();
+            model = glm::translate(model, -mycam.pos);  // Modeli hareket ettiriyokm kendim yerine floating point daha precise olsun diye.
+
+            model = glm::scale(model, glm::vec3(1.0f, mycam.height_multiplier * 1.0f, 1.0f)); // Büyüsün diye scale ettim
+
+
+
+
+
+            // Normal local->world matrix of the object
+            glm::mat3x3 normalMatrix = glm::inverseTranspose(model);
+            glUniformMatrix4fv(U_TRANSFORM_MODEL, 1, false, glm::value_ptr(model)); // önce bu matrisi yolladık shadera
+            glUniformMatrix4fv(U_TRANSFORM_VIEW, 1, false, glm::value_ptr(view)); // daha sonra bu  devam ediyo
+            glUniformMatrix4fv(U_TRANSFORM_PROJ, 1, false, glm::value_ptr(proj));
+            glUniformMatrix3fv(U_TRANSFORM_NORMAL, 1, false, glm::value_ptr(normalMatrix));
+            glUniform3f(U_LIGHT_POS, point123.x, point123.y, point123.z); // güneşin relativ pozisyonu
+
+        }
+        // Fragment shader
+        glUseProgramStages(state.renderPipeline, GL_FRAGMENT_SHADER_BIT, fShader.shaderId);
+        glActiveShaderProgram(state.renderPipeline, fShader.shaderId);
+        {
+            // Bind texture(s)
+            // You can bind texture via GL_TEXTURE0 + x where x is the bind point at the shader
+            // you do not need to explicitly say GL_TEXTURE1 GL_TEXTURE2 etc.
+            // Here is a demonstration as static assertions.
+            static_assert(GL_TEXTURE0 + 1 == GL_TEXTURE1, "OGL API is wrong!");
+            static_assert(GL_TEXTURE0 + 2 == GL_TEXTURE2, "OGL API is wrong!");
+            static_assert(GL_TEXTURE0 + 16 == GL_TEXTURE16, "OGL API is wrong!");
+            glActiveTexture(GL_TEXTURE0 + T_ALBEDO);
+            glBindTexture(GL_TEXTURE_2D, tex.textureId);
+
+            glUniform1ui(U_MODE, state.mode);
+            int maxH_location = glGetUniformLocation(fShader.shaderId, "umaxheight");
+            int minH_location = glGetUniformLocation(fShader.shaderId, "uminheight");
+            glUniform1f(maxH_location, static_cast<float>(maxheight));
+            glUniform1f(minH_location, static_cast<float>(minheight));
+
+
+
+        }
+        // Bind VAO
+        //glBindVertexArray(mesh.vaoId); // bunu uncommentledim
+        glBindVertexArray(myVAO); // deneme terrain
+
+
+        if (myinputs.wireframeMode) {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE); // SADECE ÇİZGİLERİ RASTERİZE EDİYO
+        }
+        else {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL); // içini RASTERIZE EDIYO
+        }
+
+        glDrawElements(GL_TRIANGLES, MyIndexBuffer.size(), GL_UNSIGNED_INT, 0);
+
+        glfwSwapBuffers(state.window);
+    }
+}

@@ -1,0 +1,355 @@
+
+#version 430
+
+#define U_time layout(location = 12)
+#define U_firednow layout(location = 19)
+#define U_timepassed_to_last layout(location = 7)
+#define T_depthMap layout(location = 10) 
+#define U_view layout(location = 8) 
+#define U_proj layout(location = 9) 
+#define U_to_be_activated layout(location = 15)
+#define U_plane_pos layout(location = 44)
+#define U_plane_dir layout(location = 45)
+#define U_BLAST_R layout(location = 46)
+#define U_tesplus layout(location = 47)
+#define U_no_of_control_matrices_x_axis layout(location = 48)  
+#define U_no_of_control_matrices_z_axis layout(location = 49)  
+#define U_missilespeed layout(location = 50)
+#define U_TRANSFORM_NORMAL	layout(location = 51) // bu mevcut boya göre olan yüzey normalleri  için   
+#define U_HEIGHT_MULTIPLIER layout(location = 52)
+#define U_plane_quat layout(location = 53)
+#define U_UPVEC_PLANE layout(location = 54)
+
+#define U_PLANE_SPEED layout(location = 56)
+
+U_time uniform float time;
+U_firednow uniform int activate_this ;  
+U_timepassed_to_last uniform float time_passed_since ;  
+uniform T_depthMap sampler2D depthMap;
+U_view uniform mat4 view;
+U_proj uniform mat4 proj;
+
+U_plane_dir uniform vec3 planedir ; 
+U_plane_quat uniform mat4 planequat ; 
+U_plane_pos uniform vec3 planepos ;   
+
+U_BLAST_R uniform float blast_radius ; 
+U_tesplus uniform int tesplus ;  // bunlar içerde kalan meshleri bulurken kullancaz.  
+U_no_of_control_matrices_x_axis uniform int x_con_no ; // bunlar içerde kalan meshleri bulurken kullancaz.  
+U_no_of_control_matrices_z_axis uniform int z_con_no ; // bunlar içerde kalan meshleri bulurken kullancaz.    
+U_missilespeed uniform float  new_missile_speed ; 
+U_TRANSFORM_NORMAL  uniform mat3 uNormalMatrix ; // bu normaller için olan vertex.   
+U_HEIGHT_MULTIPLIER uniform int uHeightMultp ;  // bu y axisteki boyu multiply ediyo.   
+U_UPVEC_PLANE uniform vec3 plane_upvec ;  
+U_PLANE_SPEED uniform float plane_speed ;  
+
+
+layout(local_size_x = 16) in;
+// 16 farklı dispatch bvar 16*16 = 256 
+
+struct Missile {
+
+	
+	mat4 model_matrix;
+
+	mat4 quaternion_mat4 ; 
+	mat4 inversemodel_matrix;
+
+	vec4 bl_rad_ifboom_ifactive_timesinceboom;  
+	vec4 position_speed; // ilk 3 pozisyon sonuncusu hızı  
+	vec4 initialpos; // ilk 3 ilk pozsiyonu sonuncusu kullanılmıyo 
+	vec4 direction; // ilk 3 direction sonuncusu kullanılmıyo  
+	vec4 surfacenormal ; 
+};
+    Missile my_cur_missile ;  
+
+	float mystep ; 
+
+
+layout(std430, binding = 9) buffer MissileBuffer {
+ Missile[] missiles;
+};
+
+layout(std430 ,  binding = 10) buffer VertexBuffer {
+	vec4[] vertices ;
+};
+layout(std430 ,  binding = 11) buffer NormalBuffer {
+	vec4[] normals ;   
+};
+
+vec3 retnormal ;  
+vec3 get_vertex(int index){
+	// indexler normalde vec3 olacak şekilde. 
+	int v0_3ind  =  3*index ;   
+	int v1_3ind = 3*index + 1 ;  
+	int v2_3ind = 3*index+2 ; 
+	int vert_index =  v0_3ind/4 ;  
+	int vert_offset =  v0_3ind % 4 ;   
+	vec3 retval ; 
+	if(vert_offset ==  0){
+	 retval = vec3(vertices[vert_index].x  , vertices[vert_index].y ,  vertices[vert_index].z); 
+	 retnormal =  vec3(normals[vert_index].x  , normals[vert_index].y ,  normals[vert_index].z); 
+	}else if(vert_offset ==  1){
+	 retval = vec3(vertices[vert_index].y  , vertices[vert_index].z ,  vertices[vert_index].w); 	
+	 retnormal =  vec3(normals[vert_index].y  , normals[vert_index].z ,  normals[vert_index].w);
+	}else if(vert_offset==  2){
+	 retval = vec3(vertices[vert_index].z  , vertices[vert_index].w ,  vertices[vert_index+1].x); 
+	 retnormal = 	vec3(normals[vert_index].z  , normals[vert_index].w ,  normals[vert_index+1].x); 	
+	}else{ // vert offset = 3 
+	 retval = vec3(vertices[vert_index].w  , vertices[vert_index+1].x ,  vertices[vert_index+1].y); 
+	 retnormal = vec3(normals[vert_index].w  , normals[vert_index+1].x ,  normals[vert_index+1].y); 
+	}
+	// bu bence doğru  vertexi dönüyo ama emin olamadım. cpudaki vec3 bundaki vec4  .  
+	// not burda gelen pozisyondan kontrol etmem de laızm aslında   
+	return retval;
+}
+
+vec3[4] retnormals ;  
+vec3[4] get_surrounding_vertices(float  x  ,  float z   ){
+	// uçak 0  ve 3600 arasında x ve z de .  bunu kontrol etmek lazım değilse  discardlıcan  yoksa hata olur vertexe erişemez. Ben yapmadım sonra yap  
+	// x ve z bunların pozisyonları zaten.   eğer    x  veya  z   3599 den büyükse 3599 yap küçükse 0 yap direkt atabilirsin de.   
+	// 
+
+	vec3 retval[4] ;
+	float fl_x = floor(x) ;  
+	int fl_x_int = int(fl_x) ;  
+	// alttakine gerek yok dışarda da füze atsak iyi olur 
+	/*
+	if(fl_x_int >=  x_con_no || fl_x_int < 0 ){
+		my_cur_missile.direction.w = 7.0f ; // bunu yapınca füzenin dışarda olduğunu anlıyoruz devam etmeye gerek yok .  
+		return retval ;     
+	}
+	*/
+
+
+	float diff_x = x-fl_x;  
+	float exact_pos_x_tes =  floor(diff_x/mystep) ;  // bu tesratete son arta kalan
+	int exact_pos_x_tes_offset = int(exact_pos_x_tes);  
+
+
+	float fl_z = floor(z) ; 
+	int fl_z_int = int(fl_z) ;
+	// gerek yok. 
+	/* 
+	if(fl_z_int >=  z_con_no || fl_z_int < 0 ){
+		my_cur_missile.direction.w = 7.0f ; // bunu yapınca füzenin dışarda olduğunu anlıyoruz devam etmeye gerek yok .  
+		return retval  ;     
+	}
+	*/
+
+	float diff_z =  z-fl_z ; 
+	float exact_pos_z_tes =  floor(diff_z/mystep) ;  // tesrate için olan 
+	int exact_pos_z_tes_offset = int(exact_pos_z_tes); 
+    // (tesplus)*no_of_control_matrices tane vertex var tek bir köşede.    // bende yaklaşık olarak 7200 yapıyo. pozisyon 0 ile no_of_control_matrices arasında geliyo.
+	int indexx = fl_x_int*z_con_no*tesplus*tesplus + fl_z_int*tesplus*tesplus + exact_pos_x_tes_offset*tesplus + exact_pos_z_tes_offset ;  
+	int myindexes[4]  ;  
+	myindexes[0] = indexx ;  // x ve  z   0  
+	myindexes[1] = indexx + tesplus  ;  // x 1 sonrakine geçti  .  
+	myindexes[2] =  indexx + 1 ;  // z bir sonrakine geçti . 
+	myindexes[3] =  indexx + 1 + tesplus ;  // iksi de bir sonrakine geçti 
+
+
+
+	int x_pos ;  
+	int z_pos ; 
+	for(int  xi = 0 ; xi < 2 ;  xi ++){
+		for(int zi =  0; zi <2 ; zi ++){
+			x_pos =  fl_x_int + xi;  
+			z_pos = fl_z_int + zi ;  
+
+			vec3 mytempvert = get_vertex(myindexes[xi + 2*zi]);  
+			retval[xi + zi*2]  = mytempvert ; 
+			retnormals[xi + zi*2]  = retnormal ;   
+		}
+	}
+	
+
+	return retval ;  
+}
+mat4 translate(vec3 offset) {
+    return mat4(
+        vec4(1.0, 0.0 , 0.0 , 0.0) , // Column 1
+        vec4(0.0, 1.0 , 0.0 , 0.0) , // Column 2
+        vec4(0.0, 0.0 , 1.0 , 0.0) , // Column 3
+        vec4(offset.x , offset.y , offset.z  , 1.0)         // Column 4 (Translation values)
+    );
+}
+mat4 getscalematrix(float  a){
+	return mat4( 
+		vec4(a , 0.0 ,0.0 ,0.0), // col1  
+		vec4(0.0 , a ,0.0 ,0.0), // col2 
+		vec4(0.0 , 0.0 ,a ,0.0), // col3
+		vec4(0.0 , 0.0 ,0.0 ,1.0) // col4
+	);
+}
+
+void updatematrices(void ){
+	mat4 missilemodel = translate(my_cur_missile.position_speed.xyz); 
+	mat4 scale_fattah =   getscalematrix(0.05);
+	missilemodel = missilemodel  * my_cur_missile.quaternion_mat4 ;   
+	missilemodel =  missilemodel*scale_fattah  ; // bu füzeyi scale etmek için
+	my_cur_missile.model_matrix = missilemodel ;  
+	mat4 normalmatrix = mat4(transpose(inverse(mat3(missilemodel)))) ;   
+	my_cur_missile.inversemodel_matrix =  normalmatrix ;  
+} 
+
+
+void traverse_grid(vec3 oldpos,  vec3 newpos ){
+
+	float tes_rate = float(tesplus) - 1.0;
+	float height_dir =  (oldpos.y  -newpos.y)*tes_rate ;  
+	float t_delta_y =  1.0/height_dir ;  
+
+
+	vec2 gridStart = oldpos.xz * tes_rate;
+	vec2 gridEnd   = newpos.xz * tes_rate;
+	vec2 gridDir   = gridEnd - gridStart ;  
+	ivec2 currentCell = ivec2(floor(gridStart)); // ilk başlangıç
+	ivec2 endCell     = ivec2(floor(gridEnd)); // son başlangıç  
+	ivec2 step = ivec2(sign(gridDir)); // bu + mı  - mi yonde hareket edicek onu veriyo  
+	vec2 gridDirsafe = max(abs(gridDir), vec2(0.000001));
+	vec2 tmax ;  // bunda ilk noktadan diğerine giderken ilk  x mi yoksa z mi intersect edicek belirlemek için  
+	if(step.x >  0  ){
+		tmax.x =  (-gridStart.x+float(currentCell.x)+1.0f)/gridDirsafe.x ;  
+
+	}else{
+		tmax.x =  (gridStart.x-float(currentCell.x))/gridDirsafe.x ;  
+	} 
+	if(step.y >  0  ){
+		tmax.y =  (-gridStart.y+float(currentCell.y)+1.0f)/gridDirsafe.y ;  
+
+	}else{
+		tmax.y =  (gridStart.y-float(currentCell.y))/gridDirsafe.y ;  
+	} 
+	int num_steps = abs(endCell.x - currentCell.x) + abs(endCell.y - currentCell.y); // toplam bu kadar farklı patch olacak  
+	vec2 tDelta = 1.0 / gridDirsafe;  // tek t'de bu kadar gidiyo    
+
+vec3[4] tempquad =  get_surrounding_vertices(oldpos.x , oldpos.z);  // bunlar ilk gelen patch   
+float oldheight =  oldpos.y ;  
+float t_enter = 0.0f ;    
+for (int i = 0; i <= num_steps; i++) {
+        
+        float checkX = float(currentCell.x) * mystep;
+        float checkZ = float(currentCell.y) * mystep;
+
+        // 2. Fetch vertices & run your 3D Möller-Trumbore intersection here
+        vec3[4] new_quad = get_surrounding_vertices(checkX, checkZ);
+
+        vec3 patchCenter = (new_quad[0] + new_quad[1] + new_quad[2] + new_quad[3]) * 0.25;
+		vec3 normalcenter =  (retnormals[0] + retnormals[1] + retnormals[2] + retnormals[3])*0.25 ;  
+
+		float t_exit = min(tmax.x, tmax.y); // 
+        t_exit = min(t_exit, 1.0);
+
+		float t_average = (t_enter + t_exit) * 0.5;
+
+		float missileCurrentY = mix(oldpos.y, newpos.y, t_average);
+		
+
+
+		vec3 explosion_point = mix(oldpos , newpos , t_average  );
+	
+
+        // collision test
+        if (missileCurrentY <= patchCenter.y*uHeightMultp) {
+            my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.y = 1.0; // BOOM!
+			my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.w =  0.0f ;  // patladıktan sonra geçen sürre. belli süreyi geçine bitir explosionu. 
+			my_cur_missile.surfacenormal.xyz = normalcenter ;  
+			
+
+            my_cur_missile.position_speed.xyz = explosion_point; // tam patladığı konumu verdi
+			updatematrices() ;   
+            break; // PATLADI
+        }
+
+
+        if (tmax.x < tmax.y) {
+            tmax.x += tDelta.x; // eğer önce xle intersection yapıcaksa oraya gidiyo   
+            currentCell.x += step.x;
+        } else {
+            tmax.y += tDelta.y;
+            currentCell.y += step.y;
+        }
+		t_enter = t_exit;
+    }
+  
+
+
+
+
+}
+
+
+
+
+
+void main(){
+	float fl_tesplus =  float(tesplus) ;  
+	// bende 3599 farklı len var.  yani eğer n =  no_of_control_matrices_x_axis  
+	//  n + n  + n*(tesrate-1) tane vertex var. bir kenarda. Meshde vec[1] updateleniyorsa vec[2] de updatelenmeli   
+	// aşağıyı (vyea yukarıyı da updatele.  )
+	mystep = 1.0f/(fl_tesplus-1.0f) ;  
+    uint id = gl_GlobalInvocationID.x; // idsi kaçsa artık
+    my_cur_missile = missiles[id] ;  
+    if(activate_this == id){ // bu idli olanı aktive ettik.  
+		my_cur_missile.initialpos.xyz = planepos +  5.0f*planedir - plane_upvec*2.0f    ;  // füzeyi tam altından atmasını istiyorumç
+
+
+
+		my_cur_missile.direction.xyz = planedir ;   
+		my_cur_missile.model_matrix = view ;   // buna gerek yok aslında. 
+		my_cur_missile.quaternion_mat4 = planequat ;    
+		my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.x = blast_radius ;  // blast radius seçtiğimiz gibi oldu.  
+		my_cur_missile.position_speed.xyz =  my_cur_missile.initialpos.xyz ;   
+		my_cur_missile.position_speed.w = new_missile_speed + plane_speed*8.0f + 400.0f ;  
+		my_cur_missile.direction.w =  0.0f ; 
+		my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.z = 3.0f ; // buy 3.0f ise    füzeyi aktive etti
+
+		updatematrices() ;  
+
+    }else{ // bu case activate_this =  -1 veya eşit değil. diğerlerini hareket ettir.  
+		if(my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.z  != 3.0f ){
+			// 3.0f değil yani aktif değil  
+		}else{
+			if(my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.y != 1.0f ){
+			// füzenin aktif olduğu ama patlamadığı case. pozisyonunu güncelleyip  ray casting yapıcaz. 
+			// eğer füze uçağın çok uzağında kaldıysa patlatabilirim  burada şu an yapmadım ama.  
+
+			vec3 oldpos =  my_cur_missile.position_speed.xyz ;   
+			vec3 newpos =  oldpos + my_cur_missile.direction.xyz*my_cur_missile.position_speed.w*time_passed_since ;  // geçen zaman  *hız *direction 
+
+			if(dot(abs(newpos-planepos),abs(newpos-planepos))>25000000){
+				my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.y =  0.0f ;  // patlaması da bitti.
+				my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.z = 0.0f ;  // 
+				return ;   
+			}  
+
+			// alttakiler füzenin pozisyonunu updateliyo
+			my_cur_missile.position_speed.xyz =  newpos ;  // bunlar yeni matris pozisyonunu eskiye veriyo.  
+			updatematrices() ;
+
+
+			vec3[4] startingpatch ;  
+			vec3[4] endingpatch ;   
+			startingpatch =  get_surrounding_vertices(oldpos.x  ,  oldpos.z  )  ;  // başlayan patch 
+			endingpatch = get_surrounding_vertices(newpos.x  ,  newpos.z  )  ;  // sondaki patch   
+			traverse_grid(oldpos , newpos   );  
+			}else{
+				// bu patladığı case bi süre sonra patlamayı inaktive edip 
+				my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.w +=  time_passed_since ;   // bu çok fazla olmuşsa iptal  
+				if(my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.w >  3.0f ){ // 3 saniyeyi geçtiyse animasyon ve vertex iptal  
+					my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.y =  0.0f ;  // patlaması da bitti.
+					my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.z = 0.0f ;  // 
+				
+				}
+
+			}
+
+		}
+		
+	}   
+
+
+
+    missiles[id] = my_cur_missile ; 
+}
