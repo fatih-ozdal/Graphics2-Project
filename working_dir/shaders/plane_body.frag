@@ -152,7 +152,7 @@ void main(void)
 			float pi = 3.1416f;
 			float finalI = ((omega+pi)/(2*pi)) ;
 			float finalJ = ((pi/2+theta)/(pi)) ;
-			vec2 sonnn = vec2(finalI,finalJ);
+			sonnn = vec2(finalI,finalJ);
 			}
 
 

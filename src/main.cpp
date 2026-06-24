@@ -747,19 +747,23 @@ BURAYA:
     std::cout << ZzMatrices.size() << endl;
     std::cout << "Start Rendering";
 
-    glBindVertexArray(myVAO);
-    glEnableVertexAttribArray(4);
-    glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
-    glBufferData(GL_ARRAY_BUFFER, MyVertexBuffer.size() * sizeof(glm::vec3), MyVertexBuffer.data(), GL_STATIC_DRAW);
-    glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, 0, (void*)0);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, myebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, MyIndexBuffer.size() * sizeof(unsigned int), MyIndexBuffer.data(), GL_STATIC_DRAW);
+    // The geometry above has already been uploaded to the GPU (lines just above).
+    // Capture the index count, then release the multi-GB CPU mirrors: on the
+    // integrated GPU these buffers live in the same RAM pool as the GPU copies,
+    // so keeping both around exhausts memory. The data is rebuilt from scratch
+    // whenever we jump back to BURAYA (tessellation change).
+    GLsizei terrainIndexCount = static_cast<GLsizei>(MyIndexBuffer.size());
 
-    glBindVertexArray(myVAO);
-    glEnableVertexAttribArray(5);
-    glBindBuffer(GL_ARRAY_BUFFER, normalBuffer);
-    glBufferData(GL_ARRAY_BUFFER, MyNormalBuffer.size() * sizeof(glm::vec3), MyNormalBuffer.data(), GL_STATIC_DRAW);
-    glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+    auto releaseHostBuffer = [](auto& v)
+    {
+        v.clear();
+        v.shrink_to_fit();
+    };
+    releaseHostBuffer(MyVertexBuffer);
+    releaseHostBuffer(MyNormalBuffer);
+    releaseHostBuffer(MyIndexBuffer);
+    releaseHostBuffer(MyVertexBuffer_water);
+    releaseHostBuffer(MyIndexBuffer_water);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
@@ -1112,7 +1116,7 @@ BURAYA:
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
         }
 
-        glDrawElements(GL_TRIANGLES, MyIndexBuffer.size(), GL_UNSIGNED_INT, 0);
+        glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
 
         glUseProgramStages(state.renderPipeline, GL_VERTEX_SHADER_BIT, vShader.shaderId);
         glActiveShaderProgram(state.renderPipeline, vShader.shaderId);
@@ -1185,7 +1189,7 @@ BURAYA:
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
         }
 
-        glDrawElements(GL_TRIANGLES, MyIndexBuffer.size(), GL_UNSIGNED_INT, 0);
+        glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, 0);
         glBindVertexArray(0);
         glBindVertexArray(myVAO);
 
