@@ -181,8 +181,8 @@ struct Plane
     float     speed = 0.0f;
     float     hitRadius = 5.0f;          // for being shot at
 
-    glm::vec3 forward() const { return glm::normalize(orientation * glm::vec3(1, 0, 0)); }
-    glm::vec3 up()      const { return glm::normalize(orientation * glm::vec3(0, 1, 0)); }
+    glm::vec3 forward() const { return orientation * glm::vec3(0, 0, 1); } // +Z
+    glm::vec3 up()      const { return orientation * glm::vec3(0, 1, 0); }
 };
 
 struct MissileConfig
