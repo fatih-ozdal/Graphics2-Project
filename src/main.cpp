@@ -846,7 +846,7 @@ BURAYA:
     enemy.hitRadius      = 6.0f;                    // bounding sphere r = 6
     enemy.path.timeScale = 0.5f;                    // attractor speed
     enemy.path.scale     = glm::vec3(12.0f, 8.0f, 12.0f);
-    enemy.path.translate = myplane.position + glm::vec3(0.0f, 150.0f, 0.0f);
+    enemy.path.translate = myplane.position + glm::vec3(10.0f, 10.0f, 0.0f);
     enemy.state          = glm::vec3(0.1f, 0.0f, 0.0f);
 
     float crater_depth = 8.0f;     // crater bowl depth fed to missile.comp
@@ -856,8 +856,13 @@ BURAYA:
     GLuint enemyHitSSBO;
     glGenBuffers(1, &enemyHitSSBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, enemyHitSSBO);
-    { GLuint zero = 0; glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint), &zero, GL_DYNAMIC_READ); }
+    { GLuint zero = 0; glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint), &zero, GL_DYNAMIC_COPY); }
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 12, enemyHitSSBO);
+
+    // CPU gate: only read enemyHitSSBO back while a missile can still be in flight.
+    // Upper bound = max flight (~5000u / 450u/s ~ 11s) + 3s fuse.
+    const float kMissileLifetime  = 15.0f;
+    float       missileActiveUntil = -1.0f;
 
     glfwSetWindowMonitor(state.window, NULL, windowwidth / 8, windowheight / 8, 7 * (windowwidth / 8), 7 * (windowheight / 8), 0);
     myinputs.texture = 4;
@@ -1218,6 +1223,7 @@ BURAYA:
         if (myinputs.space_pressed) {
             myinputs.space_pressed = false;
             update_this_pos = find_inactive_missile(mymissiles);
+            missileActiveUntil = current_time + kMissileLifetime;
         }
 
         // --- Advance the enemy along its Lorenz path ---
@@ -1279,13 +1285,18 @@ BURAYA:
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
         glUseProgram(0);
 
-        // Read back the enemy-hit flag -> mark the enemy dead.
-        {
+        // Read back the enemy-hit flag only while a missile is in flight (gates the
+        // VIDEO->HOST copy that otherwise ran every frame).
+        bool anyMissileActive = (current_time < missileActiveUntil);
+        if (anyMissileActive && enemy.alive) {
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, enemyHitSSBO);
             GLuint enemyHitFlag = 0;
             glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &enemyHitFlag);
-            if (enemyHitFlag != 0 && enemy.alive) {
+            if (enemyHitFlag != 0) {
                 enemy.alive = false;   // stop drawing it
+                // Reset the SSBO flag immediately so it can't re-trigger next frame.
+                GLuint zero = 0;
+                glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &zero);
                 // The striking missile is already flagged exploded in the SSBO,
                 // so its 3s BOOM state plays at the contact point. A sprite-sheet
                 // billboard (combat::sampleSprite) would be spawned here once an
