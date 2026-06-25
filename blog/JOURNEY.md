@@ -149,8 +149,8 @@ transitions from true to false, a `hitTimer` is set to a small duration (around 
 and the enemy keeps being rendered while the timer counts down. During that window, the
 plane's fragment shader mixes its final color heavily toward red so the hit reads clearly.
 After the timer reaches zero, the enemy stops being drawn. It is a small effect but it makes
-the moment of contact feel intentional rather than instantaneous, and it gives a place to
-later attach the explosion sprite animation when that lands.
+the moment of contact feel intentional rather than instantaneous, and it pairs with the
+explosion sprite animation that plays at the same position.
 
 ### Spawning more enemies
 
@@ -206,15 +206,11 @@ bright bursts read well in the HDR pipeline without needing a meaningful alpha c
 MRT output. Depth testing stays on so terrain still occludes explosions, but depth writes are
 off so explosions don't occlude each other awkwardly.
 
-This is a deliberately CPU-side feature. The enemy's world position is known on the CPU (it
-comes from the Lorenz integration each frame), so spawning the explosion there is free — no
-readback needed. Terrain-hit explosions would require the GPU to report the impact world
-position back to the CPU, since the missile and the hit test both live in the compute shader.
-That would mean another gated readback, which is the same category of code as the OOM section
-above — terrain explosions are left out, and the crater itself is the visual
-response to a ground impact. A natural follow-up would be a fully GPU-side explosion system: an
-explosion SSBO that the compute shader appends to directly, with instanced billboard rendering
-reading from it — no CPU bridge at all.
+This is a CPU-side feature. The enemy's world position is known on the CPU (it comes from the
+Lorenz integration each frame), so spawning the explosion there is straightforward — no GPU
+readback needed. Terrain hits are different: the impact point lives on the GPU inside the compute
+shader, so they need a small bridge to come back across. That bridge is the subject of the next
+section.
 
 ### Terrain-hit explosions
 
@@ -609,3 +605,102 @@ the sharp lip would otherwise create.
 
 Most of the fixes were a single flag, value, or sign. Most of the diagnosis was tracing a symptom
 back to a cause in a different part of the pipeline.
+
+## Doing everything on the GPU
+
+Both my professor and the course assistant pointed out that this whole system could probably run
+entirely on the GPU, with no CPU bridge at all. By the end of the project I have an idea how
+that would look — I just did not have the time to migrate the architecture to it. Since it is the
+natural conclusion of the "keep the heavy data on the GPU" rule I kept bumping into, it is worth
+writing down properly.
+
+The one place my design bends that rule is the CPU↔GPU exchange around gameplay events: the CPU
+integrates the enemies, uploads their transforms every frame, reads back the hit flags and the
+terrain-impact position, and owns the `std::vector<Explosion>` that a CPU billboard pass renders.
+Every one of those steps can move onto the GPU.
+
+**Enemy simulation.** The Lorenz integration is just arithmetic — four RK4 evaluations of a
+three-line system per enemy. That is a natural fit for a compute shader: store each enemy's state
+(Lorenz seed, position, orientation quaternion, `alive`, `hitTimer`) in an SSBO and run one
+invocation per enemy each frame to advance it. The CPU stops integrating and stops uploading
+transforms; it only pushes the player's transform and `dt` as uniforms.
+
+**Collision and hit response.** The missile compute shader already runs the collision test. Today
+it writes a flag (or a position) into a small buffer for the CPU to read back and act on. Instead,
+on a hit it can write the *response* directly into the enemy SSBO — atomically set that enemy's
+`alive = 0` and `hitTimer = 2.0` — and never tell the CPU at all. The readback disappears because
+the side effect happens where the data already lives.
+
+**Explosions as a GPU particle system.** This is the part I sketched earlier for terrain hits,
+generalized. A single explosion SSBO with an atomic append counter: whenever any hit fires (enemy
+or terrain), the compute shader does an `atomicAdd` to claim a slot and writes
+`{ position, timer = 0, duration }` into it. A second small compute pass each frame advances every
+explosion's timer and frees the expired ones. There is no `std::vector`, no spawn call crossing the
+bus — the CPU never knows an explosion exists.
+
+**Drawing without a CPU count.** The remaining reason the CPU usually has to know about all this is
+to issue draw calls with the right instance count. Indirect draw commands remove that too: the live
+enemy and explosion counts are written into a GPU buffer, and `glDrawArraysIndirect` /
+`glDrawElementsIndirect` read the count straight from that buffer. The enemy meshes, their bounding
+spheres, and the explosion billboards all become instanced indirect draws that pull transforms and
+timers from their SSBOs by `gl_InstanceID`. The CPU records the same handful of commands every
+frame regardless of how many things are alive.
+
+What is genuinely left on the CPU is the part that belongs there: reading input, advancing the
+player's own transform, managing the window and framebuffers, and pushing a few uniforms. Everything
+else — enemy motion, collision, hit response, terrain deformation, explosions, and even the draw
+counts — would stay GPU-resident from spawn to death.
+
+The fair question is: if I could see the GPU-only design clearly, why did I not build it that way?
+Two reasons. First, each new feature I added (enemies, multi-enemy spawning, hit
+feedback, explosions, terrain craters) was a separable piece that needed to ship as soon as it was
+working because I had little time. Putting any one of them on the GPU also required building the surrounding infrastructure —
+an enemy SSBO with a stable layout, atomic counters, indirect draw setup, per-frame update compute
+passes — before I could see anything on screen. The CPU path let me land each feature against a
+working baseline and verify it visually in minutes, then move to the next. The GPU-only path would
+have been one large refactor with nothing visible until the whole thing came together. On a deadline
+that trade is not subtle. Second, the debug story is different: a CPU-side `std::vector<Explosion>`
+can be printed, watched in a debugger, and verified by eye. A GPU SSBO holding the same state needs
+an entire scaffold of debug readbacks to inspect — which I already had to build once for the crater
+problem and did not want to commit to again for every new subsystem under time pressure.
+
+So the choice was not "easier" versus "harder" — it was "incremental, debuggable, and demo-safe"
+versus "architecturally pure but high-risk to land at all." Given a fresh start without the
+deadline I would build the GPU-only version, and the structure above is the blueprint I would
+follow.
+
+One last note of honesty: in the HW3 write-up I mentioned that I would add a rain particle system
+to the term project. I did not get to it. The structure above — a particle SSBO with atomic
+append, a per-frame update compute pass, and instanced indirect-drawn billboards — is exactly the
+shape rain would have taken, so the design exists on paper even though the implementation does not.
+
+## Conclusion
+
+This project grew the HW2 terrain renderer into something with gameplay in it: a plane to fly,
+enemies that chase Lorenz-attractor paths, and missiles that both deform the ground and set off
+sprite explosions. Every piece leaned on the same rule — keep the heavy state on the GPU and
+bridge only small, event-driven signals back to the CPU. The enemy-hit flag, the terrain-impact
+position, and the in-place crater deformation all fall out of that one decision, and the place
+the design still bends — the CPU-side explosion list — points directly at the obvious next step.
+
+The recurring pattern while debugging was that the fixes were small and the diagnosis was not — a
+usage flag, a clamped timestep, a sign, a threshold, each sitting a layer or two away from where
+the symptom showed. The thread worth pulling hardest was the gated-readback pattern: it cleared
+the out-of-memory crash, came back for enemy hits and terrain explosions, and its single-`vec4`
+and per-shot-timer limits are exactly what a fully GPU-side particle system would remove.
+
+Below is a demo video of the finished build.
+
+---
+
+**Demo Video** — click to watch on YouTube
+
+<p align="center">
+  <a href="https://youtu.be/TFnFJZWPTgw">
+    <img src="https://img.youtube.com/vi/TFnFJZWPTgw/0.jpg" alt="Demo Video"/>
+  </a>
+</p>
+
+---
+
+<p align="center"><em>Thanks for reading, and take care.</em></p>

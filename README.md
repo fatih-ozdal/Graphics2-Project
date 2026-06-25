@@ -6,6 +6,16 @@ planes that follow chaotic Lorenz-attractor flight paths, and blow craters in th
 ground. A write-up of the implementation and the bugs fought along the way is in
 [blog/JOURNEY.md](blog/JOURNEY.md).
 
+## Demo Video
+
+The latest version of the project is demonstrated in the video below:
+
+<p align="center">
+  <a href="https://youtu.be/TFnFJZWPTgw">
+    <img src="https://img.youtube.com/vi/TFnFJZWPTgw/0.jpg" alt="Demo Video"/>
+  </a>
+</p>
+
 ## Dependencies
 
 Everything is vendored under `ext/` (GLFW, GLAD, GLM, stb_image), so the only system
