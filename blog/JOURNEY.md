@@ -150,6 +150,20 @@ After the timer reaches zero, the enemy stops being drawn. It is a small effect 
 the moment of contact feel intentional rather than instantaneous, and it gives a place to
 later attach the explosion sprite animation when that lands.
 
+### Spawning more enemies
+
+A single enemy gets boring quickly during testing, so I bound the N key to spawn an
+additional enemy plane at runtime. Each new enemy is pushed into a
+`std::vector<combat::EnemyPlane>` with a slightly perturbed Lorenz seed and a translated path
+centre, so they don't all trace the same butterfly through the same patch of sky. The
+per-frame loop iterates over the vector for updates, rendering, hit checks, and the red-flash
+timer — each enemy keeps its own state. The bounding sphere and hit feedback work identically
+per enemy.
+
+It is a small quality-of-life feature but it makes the scene feel more like a target range
+than a single duel, and it stress-tests the missile collision and explosion paths against
+multiple targets at once.
+
 ### Terrain crater deformation in the compute shader
 
 The deformation lives inside the missile compute shader. The dispatch is one invocation **per
