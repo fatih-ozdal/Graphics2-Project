@@ -67,3 +67,10 @@ and should be run from the `working_dir/` directory.
 
 - Run the executable from `working_dir/` — shaders, textures, meshes, and the explosion
   sprite sheet are all loaded with paths relative to that directory.
+- If the window shows "Terrain Renderer is not responding" shortly after launch, just wait —
+  the program is still working, not crashed.
+- The project runs cleanly on the department lab machines (the inek machines), which is where
+  it was developed and tested. On my own laptop (Mesa Intel drivers) it ran out of memory at
+  startup, likely due to a driver-specific interaction with the large terrain SSBOs or my
+  hardware. If the project does not run on your evaluation machine, please try it on an inek
+  machine — it has been verified to work there.
