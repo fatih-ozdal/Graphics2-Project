@@ -214,6 +214,65 @@ response to a ground impact. A natural follow-up would be a fully GPU-side explo
 explosion SSBO that the compute shader appends to directly, with instanced billboard rendering
 reading from it — no CPU bridge at all.
 
+### Terrain-hit explosions
+
+A missile hitting the ground produces a crater, but the crater alone reads more as "something
+changed" than as "something blew up." To make terrain hits land with the same visual weight as
+enemy kills, the same explosion billboard plays at the impact point on the ground.
+
+The complication is that a terrain hit is detected entirely on the GPU, inside the missile
+compute shader. The CPU never sees the missile's position frame to frame, so it cannot spawn an
+explosion the way it does for enemies. The fix is a small GPU→CPU channel that reuses the same
+gated-readback pattern as the enemy-hit flag, just carrying a position instead of a bit.
+
+A new SSBO holds a single `vec4 terrainImpact` — three components for the world position, one
+for a flag. When the compute shader detects a terrain hit it writes the impact world position
+into this buffer and sets the flag to 1.0:
+
+```glsl
+terrainImpact = vec4(explosion_point, 1.0);
+```
+
+The buffer is zeroed every frame before the dispatch, so anything written this frame is fresh.
+After the dispatch, inside the same `if (anyMissileActive)` gate that reads the enemy-hit flag,
+the CPU reads `terrainImpact`:
+
+```cpp
+if (terrainImpact.w > 0.5) {
+    explosions.push_back({ glm::vec3(terrainImpact.x, terrainImpact.y, terrainImpact.z),
+                           0.0f, 0.35f, true });
+}
+```
+
+From here the rendering path is identical to the enemy-hit case — same `Explosion` struct, same
+billboard shader, same additive blending. The compute shader is the source of the position;
+everything downstream is the existing pipeline.
+
+One limitation: the buffer is a single `vec4`, so if two missiles hit terrain in the same frame,
+the second overwrites the first and only one explosion spawns. For a single-player scene with one
+player firing, this is fine — simultaneous ground hits in the same frame would be coincidence,
+not a normal case. The cleaner shape is an append buffer with an atomic counter, which would
+store an arbitrary number of impacts per frame; that is the same pattern the rain particle
+system would use, but I did not implement it here.
+
+#### What I would do next: GPU-only explosions
+
+The architecture rule throughout this project has been to keep heavy data on the GPU and only
+sync small things back to the CPU on events. Explosions are the one place that rule bends — the
+explosion list lives on the CPU, the GPU has to report impact positions across the bridge, and a
+CPU billboard pass renders them. It works, but it is the last meaningful CPU↔GPU exchange in the
+system.
+
+The natural next step is a fully GPU-side explosion system: a self-contained explosion SSBO that
+the compute shader writes directly when a hit happens (both enemy and terrain), a small per-frame
+compute pass that advances each explosion's timer and reaps expired ones, and instanced billboard
+rendering that reads positions and timers straight from the SSBO with `glDrawArraysInstanced`. No
+CPU bridge, no readback, no `std::vector<Explosion>` — the CPU never sees an explosion exist. This
+is also the structure rain or any other particle system would use, since thousands of particles
+cannot reasonably be managed CPU-side. I did not have time to migrate to this architecture for the
+term project, but it is the obvious continuation of the design and would close the last gap left
+by the gated-readback pattern.
+
 ### Toggling the bounding sphere debug view
 
 The enemy's collision volume is rendered as a wireframe sphere around its body so I can see
