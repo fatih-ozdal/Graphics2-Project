@@ -1331,7 +1331,8 @@ BURAYA:
                 glm::vec3 offset(((count % 4) - 1.5f) * 50.0f,   // spread across X
                                  (count % 3) * 25.0f,            // a little Y variation
                                  ((count / 4) % 4 - 1.5f) * 50.0f);
-                e.path.translate = myplane.position + glm::vec3(0.0f, 100.0f, 0.0f) + offset;
+                offset *= 1.31f; // spread the planes out a bit more
+                e.path.translate = myplane.position + glm::vec3(0.0f, 80.0f, 0.0f) + offset;
                 e.state          = glm::vec3(0.1f + 0.05f * count, 0.0f, 0.0f);
                 e.alive    = true;
                 e.hitTimer = 0.0f;
