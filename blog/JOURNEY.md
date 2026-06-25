@@ -142,7 +142,7 @@ so fast direction changes in the attractor become banking turns instead of insta
 ### Hit feedback: flashing the enemy red
 
 When a missile strikes the enemy, the plane shouldn't just vanish — there should be a brief
-visual acknowledgment of the hit. I added a hit timer to the enemy. The moment `enemy.alive`
+visual acknowledgment of the hit. A hit timer drives this. The moment `enemy.alive`
 transitions from true to false, a `hitTimer` is set to a small duration (around 2 seconds),
 and the enemy keeps being rendered while the timer counts down. During that window, the
 plane's fragment shader mixes its final color heavily toward red so the hit reads clearly.
@@ -163,6 +163,65 @@ per enemy.
 It is a small quality-of-life feature but it makes the scene feel more like a target range
 than a single duel, and it stress-tests the missile collision and explosion paths against
 multiple targets at once.
+
+### Explosion sprites on enemy hit
+
+When a missile strikes an enemy, the red flash is followed by a proper explosion
+animation drawn at the impact position. The animation is a 4-frame sprite sheet — small
+flash, medium burst, large burst, smoke — preprocessed at load time: the JPG's white
+background is keyed to transparent (any pixel with all channels above ~240 gets alpha = 0)
+and uploaded as a single RGBA texture, with the four frames laid out side by side. Each
+frame is one quarter of the texture's width.
+
+The explosion itself lives in `combat.hpp` as a small struct:
+
+```cpp
+struct Explosion {
+    glm::vec3 position;
+    float     timer;
+    float     duration;   // 0.35 seconds total
+    bool      alive;
+};
+```
+
+When an enemy is hit, an `Explosion` is pushed into a `std::vector<Explosion>` at the enemy's
+world position. Each frame, all alive explosions advance their timer, and any whose timer
+exceeds `duration` are erased.
+
+Rendering is a camera-facing billboard. The vertex shader takes no attributes — it builds the
+four quad corners from `gl_VertexID` (as a triangle strip) and offsets them in view space, so
+the quad always faces the camera regardless of orientation. The current frame is computed from
+the timer:
+
+```glsl
+int   frame = clamp(int(timer / duration * 4.0), 0, 3);
+float u     = (float(frame) + cornerU) / 4.0;
+```
+
+so the sub-UV samples only that frame's quarter of the sheet. The fragment shader samples the
+texture, discards keyed-transparent pixels, and uses additive blending (`GL_ONE, GL_ONE`) so
+bright bursts read well in the HDR pipeline without needing a meaningful alpha channel in the
+MRT output. Depth testing stays on so terrain still occludes explosions, but depth writes are
+off so explosions don't occlude each other awkwardly.
+
+This is a deliberately CPU-side feature. The enemy's world position is known on the CPU (it
+comes from the Lorenz integration each frame), so spawning the explosion there is free — no
+readback needed. Terrain-hit explosions would require the GPU to report the impact world
+position back to the CPU, since the missile and the hit test both live in the compute shader.
+That would mean another gated readback, which is the same category of code as the OOM section
+above — terrain explosions are left out, and the crater itself is the visual
+response to a ground impact. A natural follow-up would be a fully GPU-side explosion system: an
+explosion SSBO that the compute shader appends to directly, with instanced billboard rendering
+reading from it — no CPU bridge at all.
+
+### Toggling the bounding sphere debug view
+
+The enemy's collision volume is rendered as a wireframe sphere around its body so I can see
+what the missile is actually hitting. During development this is essential, but in the final
+scene the wireframe is visual noise. I bound the B key to toggle a `showBoundingSpheres` bool.
+When the flag is on, each alive enemy draws its wireframe sphere; when it's off, the sphere
+render is skipped but the collision math is unchanged. The default is on, so the spheres are
+visible at startup and can be hidden for a cleaner shot.
 
 ### Terrain crater deformation in the compute shader
 
@@ -278,12 +337,12 @@ That was the plan, anyway — in practice the gate did not close as cleanly as d
 readback spam was reduced but not eliminated. The gate is implemented as a fixed 5-second
 lifetime window after each shot, based on the assumption that a missile is either resolved or
 expired within that time. In practice the warnings continued well past 5 seconds in my
-testing, so something in the gate is still not closing as intended — I added diagnostic
-prints to confirm whether `anyMissileActive` actually flips back to false, but did not finish
+testing, so something in the gate is still not closing as intended — I tried debugging with
+prints to check whether `anyMissileActive` actually flips back to false, but did not finish
 chasing it down before moving on to the remaining gameplay features. The proper fix is
 probably to drive the gate from an actual GPU-side signal (the missile's own dead/expired
 state) rather than a CPU-side timer estimate, but doing that without per-frame readback is the
-same problem one level deeper. For now the spam is reduced from "every frame forever" to
+same problem one level deeper. The spam is reduced from "every frame forever" to
 "every frame while a shot is considered live," which kept the OOM from happening but is not a
 finished solution.
 
