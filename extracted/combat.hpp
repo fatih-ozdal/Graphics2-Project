@@ -281,6 +281,7 @@ struct EnemyPlane
     glm::quat orientation{ 1, 0, 0, 0 };
     float     hitRadius = 6.0f;             // bounding-sphere radius
     bool      alive = true;
+    float     hitTimer = 0.0f;              // >0 = dying: keep drawing with a red flash
     bool      initialized = false;          // first frame seeds position
 };
 

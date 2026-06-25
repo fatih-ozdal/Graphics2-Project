@@ -844,9 +844,9 @@ BURAYA:
     // ============================================================
     combat::EnemyPlane enemy;
     enemy.hitRadius      = 6.0f;                    // bounding sphere r = 6
-    enemy.path.timeScale = 0.5f;                    // attractor speed
+    enemy.path.timeScale = 0.25f;                   // attractor speed
     enemy.path.scale     = glm::vec3(12.0f, 8.0f, 12.0f);
-    enemy.path.translate = myplane.position + glm::vec3(0.0f, 50.0f, 0.0f);  // start in view, 50u above the player
+    enemy.path.translate = myplane.position + glm::vec3(0.0f, 100.0f, 0.0f);  // spawn well above the terrain
     enemy.state          = glm::vec3(0.1f, 0.0f, 0.0f);
 
     float crater_depth = 15.0f;    // crater bowl depth fed to missile.comp
@@ -859,9 +859,9 @@ BURAYA:
     { GLuint zero = 0; glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint), &zero, GL_DYNAMIC_COPY); }
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 12, enemyHitSSBO);
 
-    // CPU gate: only read enemyHitSSBO back while a missile can still be in flight.
-    // Upper bound = max flight (~5000u / 450u/s ~ 11s) + 3s fuse.
-    const float kMissileLifetime  = 15.0f;
+    // CPU gate: only read enemyHitSSBO back while a missile is considered live.
+    // Rough window during which a shot should have resolved or expired.
+    const float kMissileLifetime  = 5.0f;
     float       missileActiveUntil = -1.0f;
     bool        anyMissileActive   = false;  // gates the enemy-hit readback; cleared on expiry or hit
 
@@ -1042,6 +1042,8 @@ BURAYA:
         static constexpr GLuint U_MODE = 0;
         static constexpr GLuint U_PMODE = 91;
         static constexpr GLuint HDR = 24;
+        static constexpr GLuint U_HIT_TINT = 80;     // su57.frag: red hit-flash amount
+        static constexpr GLuint U_DEBUG_COLOR = 81;  // su57.frag: flat debug color (a>0.5 => on)
 
         static float maxheight = maxheight1 / x_scale;
         static float minheight = minheight1 / x_scale;
@@ -1236,6 +1238,11 @@ BURAYA:
         // integrator overflow to inf -> NaN, which then sticks every frame.
         combat::updateEnemy(enemy, glm::min(diff, 0.05f));
 
+        // Count down the hit-flash timer while the enemy is dying (it stays put,
+        // since updateEnemy early-outs once !alive).
+        if (!enemy.alive && enemy.hitTimer > 0.0f)
+            enemy.hitTimer = glm::max(0.0f, enemy.hitTimer - diff);
+
         // Debug: confirm the enemy is alive and moving (every 60 frames).
         if (frameCount % 60 == 0) {
             std::cout << "\n[enemy] frame " << frameCount
@@ -1313,7 +1320,8 @@ BURAYA:
             GLuint enemyHitFlag = 0;
             glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &enemyHitFlag);
             if (enemyHitFlag != 0) {
-                enemy.alive = false;        // stop drawing it
+                enemy.alive = false;        // stop flying it
+                enemy.hitTimer = 2.0f;      // ...but keep drawing it red for ~2s
                 anyMissileActive = false;   // the missile is gone; stop polling immediately
                 // Reset the SSBO flag immediately so it can't re-trigger next frame.
                 GLuint zero = 0;
@@ -1387,6 +1395,8 @@ BURAYA:
         glActiveShaderProgram(state.renderPipeline, fShaderSu57.shaderId);
         {
             glUniform1ui(HDR, myinputs.hdr_on ? 1 : 0);
+            glUniform1f(U_HIT_TINT, 0.0f);                       // player is never tinted
+            glUniform4f(U_DEBUG_COLOR, 0.0f, 0.0f, 0.0f, 0.0f);  // player is fully shaded
 
             glActiveTexture(GL_TEXTURE0 + 18);
             glBindTexture(GL_TEXTURE_2D, tex_su57_body.textureId);
@@ -1410,7 +1420,8 @@ BURAYA:
         //  Enemy plane (reuses the player's su57 model + shaders) +
         //  its debug wireframe bounding sphere.
         // ============================================================
-        if (enemy.alive) {
+        // Draw the enemy while it is alive, and for ~2s after a hit (dying flash).
+        if (enemy.alive || enemy.hitTimer > 0.0f) {
             glm::mat4 enemy_model = glm::translate(glm::mat4(1.0f), enemy.position)
                                   * glm::mat4_cast(enemy.orientation)
                                   * glm::scale(glm::mat4(1.0f), glm::vec3(0.3f));
@@ -1422,11 +1433,18 @@ BURAYA:
                 glUniformMatrix4fv(U_TRANSFORM_MODEL, 1, false, glm::value_ptr(enemy_model));
                 glUniformMatrix3fv(U_TRANSFORM_NORMAL, 1, false, glm::value_ptr(enemy_NormalMatrix));
             }
+            // Fragment: flash red while dying (alive -> no tint); no flat debug color.
+            glActiveShaderProgram(state.renderPipeline, fShaderSu57.shaderId);
+            {
+                glUniform1f(U_HIT_TINT, enemy.alive ? 0.0f : 0.7f);
+                glUniform4f(U_DEBUG_COLOR, 0.0f, 0.0f, 0.0f, 0.0f);
+            }
             glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(su57.indexCount), GL_UNSIGNED_INT, nullptr);
 
-            // Debug wireframe bounding sphere (radius == enemy.hitRadius == 6).
+            // Debug wireframe bounding sphere: 1.5x the hit radius, flat yellow so it
+            // is clearly visible (tuning aid -- remove/restyle later).
             glm::mat4 sphere_model = glm::translate(glm::mat4(1.0f), enemy.position)
-                                   * glm::scale(glm::mat4(1.0f), glm::vec3(enemy.hitRadius));
+                                   * glm::scale(glm::mat4(1.0f), glm::vec3(enemy.hitRadius * 1.5f));
             glm::mat3 sphere_NormalMatrix = glm::inverseTranspose(sphere_model);
 
             glBindVertexArray(sphereObjceet.vaoId);
@@ -1434,6 +1452,11 @@ BURAYA:
             {
                 glUniformMatrix4fv(U_TRANSFORM_MODEL, 1, false, glm::value_ptr(sphere_model));
                 glUniformMatrix3fv(U_TRANSFORM_NORMAL, 1, false, glm::value_ptr(sphere_NormalMatrix));
+            }
+            glActiveShaderProgram(state.renderPipeline, fShaderSu57.shaderId);
+            {
+                glUniform1f(U_HIT_TINT, 0.0f);
+                glUniform4f(U_DEBUG_COLOR, 1.0f, 1.0f, 0.0f, 1.0f);  // flat yellow
             }
             glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
             glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(sphereObjceet.indexCount), GL_UNSIGNED_INT, nullptr);

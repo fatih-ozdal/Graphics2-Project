@@ -139,6 +139,17 @@ if (glm::dot(vel, vel) > 1e-8f) {
 The slerp is what makes the motion read as flight — the plane eases between headings smoothly,
 so fast direction changes in the attractor become banking turns instead of instant rotations.
 
+### Hit feedback: flashing the enemy red
+
+When a missile strikes the enemy, the plane shouldn't just vanish — there should be a brief
+visual acknowledgment of the hit. I added a hit timer to the enemy. The moment `enemy.alive`
+transitions from true to false, a `hitTimer` is set to a small duration (around 2 seconds),
+and the enemy keeps being rendered while the timer counts down. During that window, the
+plane's fragment shader mixes its final color heavily toward red so the hit reads clearly.
+After the timer reaches zero, the enemy stops being drawn. It is a small effect but it makes
+the moment of contact feel intentional rather than instantaneous, and it gives a place to
+later attach the explosion sprite animation when that lands.
+
 ### Terrain crater deformation in the compute shader
 
 The deformation lives inside the missile compute shader. The dispatch is one invocation **per
@@ -248,6 +259,19 @@ closes when that window elapses or when a hit is detected, whichever comes first
 estimate, but it costs zero readbacks, which is the goal.
 
 The rule to take away: do not leave an SSBO readback running per frame. Gate it to an event.
+
+That was the plan, anyway — in practice the gate did not close as cleanly as designed. The
+readback spam was reduced but not eliminated. The gate is implemented as a fixed 5-second
+lifetime window after each shot, based on the assumption that a missile is either resolved or
+expired within that time. In practice the warnings continued well past 5 seconds in my
+testing, so something in the gate is still not closing as intended — I added diagnostic
+prints to confirm whether `anyMissileActive` actually flips back to false, but did not finish
+chasing it down before moving on to the remaining gameplay features. The proper fix is
+probably to drive the gate from an actual GPU-side signal (the missile's own dead/expired
+state) rather than a CPU-side timer estimate, but doing that without per-frame readback is the
+same problem one level deeper. For now the spam is reduced from "every frame forever" to
+"every frame while a shot is considered live," which kept the OOM from happening but is not a
+finished solution.
 
 ### The Lorenz attractor producing NaN
 

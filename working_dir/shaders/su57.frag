@@ -11,7 +11,9 @@
     #define OUT_FBO     layout(location = 0)
     #define OUT_TEX     layout(location = 1)
 
-    #define U_HDR       layout(location = 24)
+    #define U_HDR         layout(location = 24)
+    #define U_HIT_TINT    layout(location = 80)
+    #define U_DEBUG_COLOR layout(location = 81)
 
     in IN_UV vec2 fUV;
     in IN_NORMAL vec3 fNormal;
@@ -23,6 +25,8 @@
     out OUT_TEX vec4 texcolor;
 
     U_HDR uniform uint uHDR;
+    U_HIT_TINT    uniform float uHitTint;    // 0 = none; >0 = mix final color toward red (hit flash)
+    U_DEBUG_COLOR uniform vec4  uDebugColor; // a>0.5 => output this flat rgb, skip lighting (debug wireframe)
 
 
     layout(binding = 18) uniform sampler2D tAlbedo;
@@ -48,8 +52,21 @@
         return normalize(TBN * tangentNormal);
     }
 
-    void main(void) 
+    void main(void)
     {
+        // Flat debug-color path (e.g. the enemy's wireframe bounding sphere):
+        // skip all lighting and just emit the requested color.
+        if (uDebugColor.a > 0.5) {
+            vec4 dbg = vec4(uDebugColor.rgb, 1.0);
+            if (uHDR == 1) {
+                texcolor = dbg;
+                float luminance = dot(texcolor.xyz, vec3(0.2126f, 0.7152f, 0.0722f));
+                texcolor.w = log(max(luminance, 1e-4));
+            } else {
+                fboColor = dbg;
+            }
+            return;
+        }
 
         vec4 albedoColor = texture(tAlbedo, fUV);
         float roughness = texture(tRoughness, fUV).r;
@@ -81,6 +98,9 @@
         if (albedoColor.g > 0.7 && albedoColor.r < 0.1) {
             finalColor += albedoColor.rgb * 1.5;
         }
+
+        // Hit flash: tint toward red while the enemy is dying.
+        finalColor = mix(finalColor, vec3(1.0, 0.0, 0.0), clamp(uHitTint, 0.0, 1.0));
 
         vec4 computedColor = vec4(finalColor, albedoColor.a);
 
