@@ -92,7 +92,7 @@ U_TEX uniform uint  texno;
 void main(void)
 {
 	if(uifwater==0 ){
-	if(vPos.y < 0.0001f ){
+	if(vPos.y < -500.0f ){
 
 
 	gl_Position = vec4(2.0,2.0,2.0,1.0);
