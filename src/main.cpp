@@ -27,6 +27,13 @@ struct Missile {
     glm::vec4 surfacenormal;
 };
 
+// GPU-side enemy record consumed by the missile compute shader's collision test.
+// std430 layout must match `struct GpuEnemy` in missile.comp.
+struct GpuEnemy {
+    glm::vec4 pos_radius;   // xyz = world position, w = hit radius
+    glm::vec4 alive_pad;    // x = alive (1.0/0.0), yzw unused
+};
+
 unsigned int missile_number = 256;
 vector<Missile> mymissiles(missile_number);
 unsigned char curmissile = 0;
@@ -112,6 +119,7 @@ struct Current_Inputs {
     bool RightMouseClicked = false;
     bool h_pressed = false;
     bool space_pressed = false;
+    bool n_pressed = false;
     bool hdr_on = 1;
     int texture = 0;
 } myinputs;
@@ -295,6 +303,11 @@ void KeyboardCallback(GLFWwindow* wnd, int key, int scancode, int action, int mo
     if (key == GLFW_KEY_SPACE) {
         if (action == GLFW_RELEASE) {
             myinputs.space_pressed = true;
+        }
+    }
+    if (key == GLFW_KEY_N) {
+        if (action == GLFW_RELEASE) {
+            myinputs.n_pressed = true;   // one-shot: spawn a new enemy plane
         }
     }
 
@@ -842,21 +855,36 @@ BURAYA:
     // ============================================================
     //  Enemy plane (single, Lorenz attractor path) + crater params
     // ============================================================
-    combat::EnemyPlane enemy;
-    enemy.hitRadius      = 6.0f;                    // bounding sphere r = 6
-    enemy.path.timeScale = 0.25f;                   // attractor speed
-    enemy.path.scale     = glm::vec3(12.0f, 8.0f, 12.0f);
-    enemy.path.translate = myplane.position + glm::vec3(0.0f, 100.0f, 0.0f);  // spawn well above the terrain
-    enemy.state          = glm::vec3(0.1f, 0.0f, 0.0f);
+    // Enemies live in a vector now (press N to spawn more). The first one keeps
+    // the original spawn; later ones get offset seeds/translates (see N handler).
+    const int kMaxEnemies = 64;
+    std::vector<combat::EnemyPlane> enemies;
+    {
+        combat::EnemyPlane e0;
+        e0.hitRadius      = 6.0f;                    // bounding sphere r = 6
+        e0.path.timeScale = 0.25f;                   // attractor speed
+        e0.path.scale     = glm::vec3(12.0f, 8.0f, 12.0f);
+        e0.path.translate = myplane.position + glm::vec3(0.0f, 100.0f, 0.0f);  // well above terrain
+        e0.state          = glm::vec3(0.1f, 0.0f, 0.0f);
+        enemies.push_back(e0);
+    }
 
     float crater_depth = 15.0f;    // crater bowl depth fed to missile.comp
     float crater_rim   = 2.0f;     // raised lip height
 
-    // Tiny SSBO (1 uint): missile.comp sets it to 1 the frame the enemy is hit.
+    // Enemy state SSBO (binding 14): per-enemy pos/radius/alive for GPU collision.
+    GLuint enemySSBO;
+    glGenBuffers(1, &enemySSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, enemySSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, kMaxEnemies * sizeof(GpuEnemy), nullptr, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 14, enemySSBO);
+
+    // Per-enemy hit flags (binding 12): missile.comp sets enemyHit[i]=1 when
+    // enemy i is struck this frame. One uint per enemy slot.
     GLuint enemyHitSSBO;
     glGenBuffers(1, &enemyHitSSBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, enemyHitSSBO);
-    { GLuint zero = 0; glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(GLuint), &zero, GL_DYNAMIC_COPY); }
+    glBufferData(GL_SHADER_STORAGE_BUFFER, kMaxEnemies * sizeof(GLuint), nullptr, GL_DYNAMIC_COPY);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 12, enemyHitSSBO);
 
     // CPU gate: only read enemyHitSSBO back while a missile is considered live.
@@ -1232,34 +1260,70 @@ BURAYA:
             anyMissileActive   = true;
         }
 
-        // --- Advance the enemy along its Lorenz path ---
+        // Press N: spawn a new enemy plane with a slightly different Lorenz seed
+        // and a count-based translate offset so they don't share one flight path.
+        if (myinputs.n_pressed) {
+            myinputs.n_pressed = false;
+            if ((int)enemies.size() < kMaxEnemies) {
+                int count = (int)enemies.size();
+                combat::EnemyPlane e;
+                e.hitRadius      = 6.0f;
+                e.path.timeScale = 0.25f;
+                e.path.scale     = glm::vec3(12.0f, 8.0f, 12.0f);
+                glm::vec3 offset(((count % 4) - 1.5f) * 50.0f,   // spread across X
+                                 (count % 3) * 25.0f,            // a little Y variation
+                                 ((count / 4) % 4 - 1.5f) * 50.0f);
+                e.path.translate = myplane.position + glm::vec3(0.0f, 100.0f, 0.0f) + offset;
+                e.state          = glm::vec3(0.1f + 0.05f * count, 0.0f, 0.0f);
+                e.alive    = true;
+                e.hitTimer = 0.0f;
+                enemies.push_back(e);
+            }
+        }
+
+        // --- Advance every enemy along its Lorenz path ---
         // Clamp the step: the first frame's diff spans the whole terrain-load
         // time (last_time starts at 0), and a large step makes the RK4 Lorenz
         // integrator overflow to inf -> NaN, which then sticks every frame.
-        combat::updateEnemy(enemy, glm::min(diff, 0.05f));
+        for (auto& e : enemies) {
+            combat::updateEnemy(e, glm::min(diff, 0.05f));
+            // Count down the hit-flash timer while a dying enemy stays put
+            // (updateEnemy early-outs once !alive).
+            if (!e.alive && e.hitTimer > 0.0f)
+                e.hitTimer = glm::max(0.0f, e.hitTimer - diff);
+        }
 
-        // Count down the hit-flash timer while the enemy is dying (it stays put,
-        // since updateEnemy early-outs once !alive).
-        if (!enemy.alive && enemy.hitTimer > 0.0f)
-            enemy.hitTimer = glm::max(0.0f, enemy.hitTimer - diff);
-
-        // Debug: confirm the enemy is alive and moving (every 60 frames).
-        if (frameCount % 60 == 0) {
+        // Debug: enemy count + first enemy's position (every 60 frames).
+        if (frameCount % 60 == 0 && !enemies.empty()) {
             std::cout << "\n[enemy] frame " << frameCount
-                      << " pos = (" << enemy.position.x << ", "
-                      << enemy.position.y << ", " << enemy.position.z << ")"
-                      << " alive = " << (enemy.alive ? 1 : 0) << std::endl;
+                      << " count = " << enemies.size()
+                      << " e0 pos = (" << enemies[0].position.x << ", "
+                      << enemies[0].position.y << ", " << enemies[0].position.z << ")"
+                      << " alive = " << (enemies[0].alive ? 1 : 0) << std::endl;
         }
         frameCount++;
 
-        // Reset the per-frame enemy-hit flag before dispatch.
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, enemyHitSSBO);
-        { GLuint zero = 0; glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &zero); }
+        // Upload current enemy state for the GPU collision test, and clear the
+        // per-enemy hit flags, before dispatch.
+        {
+            std::vector<GpuEnemy> gpu(enemies.size());
+            for (size_t i = 0; i < enemies.size(); ++i) {
+                gpu[i].pos_radius = glm::vec4(enemies[i].position, enemies[i].hitRadius);
+                gpu[i].alive_pad  = glm::vec4(enemies[i].alive ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+            }
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, enemySSBO);
+            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, gpu.size() * sizeof(GpuEnemy), gpu.data());
+
+            std::vector<GLuint> zeros(enemies.size(), 0);
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, enemyHitSSBO);
+            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, zeros.size() * sizeof(GLuint), zeros.data());
+        }
 
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 9, missileSSBO);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 10, vertexBuffer);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 11, normalBuffer);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 12, enemyHitSSBO);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 14, enemySSBO);
 
         GLuint dispatch_buffer_3;
         glUseProgram(computeShaderMissile.shaderId);
@@ -1297,12 +1361,10 @@ BURAYA:
         glBindTexture(GL_TEXTURE_2D, depthTexture);
         glUniform1i(10, 0);
 
-        // Crater + enemy-collision uniforms.
+        // Crater uniforms + enemy count (positions/radii now come from enemySSBO).
         glUniform1f(57, crater_depth);
         glUniform1f(58, crater_rim);
-        glUniform3fv(60, 1, glm::value_ptr(enemy.position));
-        glUniform1f(61, enemy.hitRadius);
-        glUniform1i(62, enemy.alive ? 1 : 0);
+        glUniform1i(63, (int)enemies.size());
 
         glDispatchCompute(16, 1, 1);
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
@@ -1313,23 +1375,30 @@ BURAYA:
         if (anyMissileActive && current_time >= missileActiveUntil)
             anyMissileActive = false;
 
-        // Read back the enemy-hit flag only while a missile is in flight (gates the
-        // VIDEO->HOST copy that otherwise ran every frame).
-        if (anyMissileActive && enemy.alive) {
+        // Read back the per-enemy hit flags only while a missile is in flight and
+        // at least one enemy is alive (gates the VIDEO->HOST copy).
+        bool anyEnemyAlive = false;
+        for (auto& e : enemies) if (e.alive) { anyEnemyAlive = true; break; }
+        if (anyMissileActive && anyEnemyAlive) {
+            std::vector<GLuint> hits(enemies.size(), 0);
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, enemyHitSSBO);
-            GLuint enemyHitFlag = 0;
-            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &enemyHitFlag);
-            if (enemyHitFlag != 0) {
-                enemy.alive = false;        // stop flying it
-                enemy.hitTimer = 2.0f;      // ...but keep drawing it red for ~2s
-                anyMissileActive = false;   // the missile is gone; stop polling immediately
-                // Reset the SSBO flag immediately so it can't re-trigger next frame.
-                GLuint zero = 0;
-                glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(GLuint), &zero);
-                // The striking missile is already flagged exploded in the SSBO,
-                // so its 3s BOOM state plays at the contact point. A sprite-sheet
-                // billboard (combat::sampleSprite) would be spawned here once an
-                // explosion render pass exists.
+            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                               hits.size() * sizeof(GLuint), hits.data());
+            bool anyHit = false;
+            for (size_t i = 0; i < enemies.size(); ++i) {
+                // Find which enemy was struck and kill only that one.
+                if (hits[i] != 0 && enemies[i].alive) {
+                    enemies[i].alive    = false;   // stop flying it
+                    enemies[i].hitTimer = 2.0f;    // ...but keep drawing it red for ~2s
+                    anyHit = true;
+                }
+            }
+            if (anyHit) {
+                anyMissileActive = false;   // a missile resolved; stop polling immediately
+                // Clear the flags so they can't re-trigger next frame.
+                std::vector<GLuint> zeros(enemies.size(), 0);
+                glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                                zeros.size() * sizeof(GLuint), zeros.data());
             }
         }
 
@@ -1420,8 +1489,9 @@ BURAYA:
         //  Enemy plane (reuses the player's su57 model + shaders) +
         //  its debug wireframe bounding sphere.
         // ============================================================
-        // Draw the enemy while it is alive, and for ~2s after a hit (dying flash).
-        if (enemy.alive || enemy.hitTimer > 0.0f) {
+        // Draw each enemy while it is alive, and for ~2s after a hit (dying flash).
+        for (auto& enemy : enemies) {
+            if (!(enemy.alive || enemy.hitTimer > 0.0f)) continue;
             glm::mat4 enemy_model = glm::translate(glm::mat4(1.0f), enemy.position)
                                   * glm::mat4_cast(enemy.orientation)
                                   * glm::scale(glm::mat4(1.0f), glm::vec3(0.3f));

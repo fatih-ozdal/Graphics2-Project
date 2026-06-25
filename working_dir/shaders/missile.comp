@@ -46,9 +46,7 @@ U_PLANE_SPEED uniform float plane_speed ;
 // ---- Added for crater deformation + enemy collision -------------------------
 layout(location = 57) uniform float crater_depth ;   // bowl depth (world units)
 layout(location = 58) uniform float crater_rim ;     // raised-lip height
-layout(location = 60) uniform vec3  enemy_pos ;       // single enemy world pos
-layout(location = 61) uniform float enemy_radius ;    // bounding-sphere radius (6)
-layout(location = 62) uniform int   enemy_alive ;     // 1 = test it, 0 = skip
+layout(location = 63) uniform int   enemy_count ;     // number of enemies in enemySSBO
 
 layout(local_size_x = 16) in;
 // 16 farklı dispatch bvar 16*16 = 256 
@@ -83,7 +81,11 @@ layout(std430 ,  binding = 11) buffer NormalBuffer {
 	vec4[] normals ;
 };
 layout(std430 ,  binding = 12) buffer EnemyHitBuffer {
-	uint enemyHit ;   // set to 1 by any missile that strikes the enemy this frame
+	uint enemyHit[] ;   // enemyHit[i] set to 1 by a missile that strikes enemy i this frame
+};
+struct GpuEnemy { vec4 pos_radius; vec4 alive_pad; }; // xyz=pos, w=radius; alive_pad.x=alive
+layout(std430 ,  binding = 14) buffer EnemyBuffer {
+	GpuEnemy gpuEnemies[] ;
 };
 
 vec3 retnormal ;  
@@ -502,19 +504,28 @@ void main(){
 			vec3[4] endingpatch ;   
 			startingpatch =  get_surrounding_vertices(oldpos.x  ,  oldpos.z  )  ;  // başlayan patch 
 			endingpatch = get_surrounding_vertices(newpos.x  ,  newpos.z  )  ;  // sondaki patch   
-			// Enemy hit first (swept sphere). If it misses, test the terrain.
-			float enemyT;
-			if(enemy_alive == 1 &&
-			   segmentSphere(oldpos, newpos, enemy_pos,
-			                 enemy_radius + my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.x,
-			                 enemyT)){
-				vec3 contact = mix(oldpos, newpos, enemyT);
+			// Enemy hit first (swept sphere) over every alive enemy; keep the
+			// earliest contact. If nothing is hit, test the terrain.
+			float blast = my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.x;
+			float bestT = 2.0f;   // >1 means "no hit" (segmentSphere returns t in [0,1])
+			int   bestE = -1;
+			for(int e = 0; e < enemy_count; e++){
+				if(gpuEnemies[e].alive_pad.x < 0.5f) continue;   // dead -> skip
+				vec3  epos = gpuEnemies[e].pos_radius.xyz;
+				float erad = gpuEnemies[e].pos_radius.w;
+				float t;
+				if(segmentSphere(oldpos, newpos, epos, erad + blast, t) && t < bestT){
+					bestT = t; bestE = e;
+				}
+			}
+			if(bestE >= 0){
+				vec3 contact = mix(oldpos, newpos, bestT);
 				my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.y = 1.0f; // BOOM
 				my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.w = 0.0f; // reset fuse
 				my_cur_missile.position_speed.xyz = contact;
-				my_cur_missile.surfacenormal.xyz = normalize(contact - enemy_pos);
+				my_cur_missile.surfacenormal.xyz = normalize(contact - gpuEnemies[bestE].pos_radius.xyz);
 				updatematrices();
-				atomicMax(enemyHit, 1u);   // report to CPU: enemy struck this frame
+				atomicMax(enemyHit[bestE], 1u);   // report to CPU: enemy bestE struck this frame
 			} else {
 				traverse_grid(oldpos , newpos   );
 			}
