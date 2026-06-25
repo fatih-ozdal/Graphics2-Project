@@ -8,6 +8,8 @@
 #include <vector>
 #include <cmath>
 #include <random>
+#include <algorithm>
+#include <stb_image.h>
 #include "../extracted/combat.hpp"   // enemy Lorenz path + collision math
 
 using namespace std;
@@ -120,6 +122,8 @@ struct Current_Inputs {
     bool h_pressed = false;
     bool space_pressed = false;
     bool n_pressed = false;
+    bool x_pressed = false;
+    bool b_pressed = false;
     bool hdr_on = 1;
     int texture = 0;
 } myinputs;
@@ -310,6 +314,16 @@ void KeyboardCallback(GLFWwindow* wnd, int key, int scancode, int action, int mo
             myinputs.n_pressed = true;   // one-shot: spawn a new enemy plane
         }
     }
+    if (key == GLFW_KEY_X) {
+        if (action == GLFW_RELEASE) {
+            myinputs.x_pressed = true;   // one-shot: debug explosion at the player
+        }
+    }
+    if (key == GLFW_KEY_B) {
+        if (action == GLFW_RELEASE) {
+            myinputs.b_pressed = true;   // one-shot: toggle bounding-sphere wireframes
+        }
+    }
 
     GLState& state = *static_cast<GLState*>(glfwGetWindowUserPointer(wnd));
     uint32_t mode = state.mode;
@@ -439,6 +453,39 @@ int main(int argc, const char* argv[]) {
 
     ShaderGL vShaderMissile = ShaderGL(ShaderGL::VERTEX, "shaders/missile.vert");
     ShaderGL fShaderMissile = ShaderGL(ShaderGL::FRAGMENT, "shaders/missile.frag");
+
+    ShaderGL explosionVert = ShaderGL(ShaderGL::VERTEX,   "shaders/explosion.vert");
+    ShaderGL explosionFrag = ShaderGL(ShaderGL::FRAGMENT, "shaders/explosion.frag");
+
+    // Explosion sprite sheet: load, key out the white background, upload as RGBA.
+    // 4 frames laid out horizontally (flash -> burst -> burst -> smoke).
+    const int explosionFrames = 4;
+    GLuint    explosionTex    = 0;
+    {
+        stbi_set_flip_vertically_on_load(1);   // match GL's bottom-left origin
+        int ew = 0, eh = 0, en = 0;
+        unsigned char* epx = stbi_load("my_textures/explosion.jpeg", &ew, &eh, &en, 4);
+        if (!epx) {
+            std::cerr << "Failed to load explosion sprite sheet (my_textures/explosion.jpeg)\n";
+        }
+        else {
+            for (int i = 0; i < ew * eh; ++i) {        // white -> transparent
+                unsigned char* p = epx + i * 4;
+                if (p[0] > 240 && p[1] > 240 && p[2] > 240) p[3] = 0;
+            }
+            glGenTextures(1, &explosionTex);
+            glBindTexture(GL_TEXTURE_2D, explosionTex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, ew, eh, 0, GL_RGBA, GL_UNSIGNED_BYTE, epx);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            stbi_image_free(epx);
+            std::cout << "Loaded explosion sheet " << ew << "x" << eh
+                      << " (" << explosionFrames << " frames, " << (ew / explosionFrames)
+                      << "px each)\n";
+        }
+    }
 
     MeshGL su57("meshes/su57_withiout_tyre.obj");
     glBindVertexArray(0);
@@ -893,6 +940,9 @@ BURAYA:
     float       missileActiveUntil = -1.0f;
     bool        anyMissileActive   = false;  // gates the enemy-hit readback; cleared on expiry or hit
 
+    std::vector<combat::Explosion> explosions;  // active billboard explosions
+    bool showBoundingSpheres = true;            // toggle with B
+
     glfwSetWindowMonitor(state.window, NULL, windowwidth / 8, windowheight / 8, 7 * (windowwidth / 8), 7 * (windowheight / 8), 0);
     myinputs.texture = 4;
 
@@ -1281,6 +1331,28 @@ BURAYA:
             }
         }
 
+        // Press X: debug explosion at the player plane (handy when hit-triggered
+        // explosions are hard to line up).
+        if (myinputs.x_pressed) {
+            myinputs.x_pressed = false;
+            explosions.push_back(combat::Explosion{ myplane.position, 0.0f, 0.6f, true });
+        }
+
+        // Press B: toggle the debug bounding-sphere wireframes.
+        if (myinputs.b_pressed) {
+            myinputs.b_pressed = false;
+            showBoundingSpheres = !showBoundingSpheres;
+        }
+
+        // Advance explosions; drop the finished ones.
+        for (auto& ex : explosions) {
+            ex.timer += diff;
+            if (ex.timer >= ex.duration) ex.alive = false;
+        }
+        explosions.erase(std::remove_if(explosions.begin(), explosions.end(),
+                         [](const combat::Explosion& e) { return !e.alive; }),
+                         explosions.end());
+
         // --- Advance every enemy along its Lorenz path ---
         // Clamp the step: the first frame's diff spans the whole terrain-load
         // time (last_time starts at 0), and a large step makes the RK4 Lorenz
@@ -1390,6 +1462,7 @@ BURAYA:
                 if (hits[i] != 0 && enemies[i].alive) {
                     enemies[i].alive    = false;   // stop flying it
                     enemies[i].hitTimer = 2.0f;    // ...but keep drawing it red for ~2s
+                    explosions.push_back(combat::Explosion{ enemies[i].position, 0.0f, 0.6f, true });
                     anyHit = true;
                 }
             }
@@ -1512,25 +1585,27 @@ BURAYA:
             glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(su57.indexCount), GL_UNSIGNED_INT, nullptr);
 
             // Debug wireframe bounding sphere: 1.5x the hit radius, flat yellow so it
-            // is clearly visible (tuning aid -- remove/restyle later).
-            glm::mat4 sphere_model = glm::translate(glm::mat4(1.0f), enemy.position)
-                                   * glm::scale(glm::mat4(1.0f), glm::vec3(enemy.hitRadius * 1.5f));
-            glm::mat3 sphere_NormalMatrix = glm::inverseTranspose(sphere_model);
+            // is clearly visible (toggle with B).
+            if (showBoundingSpheres) {
+                glm::mat4 sphere_model = glm::translate(glm::mat4(1.0f), enemy.position)
+                                       * glm::scale(glm::mat4(1.0f), glm::vec3(enemy.hitRadius * 1.5f));
+                glm::mat3 sphere_NormalMatrix = glm::inverseTranspose(sphere_model);
 
-            glBindVertexArray(sphereObjceet.vaoId);
-            glActiveShaderProgram(state.renderPipeline, vShaderSu57.shaderId);
-            {
-                glUniformMatrix4fv(U_TRANSFORM_MODEL, 1, false, glm::value_ptr(sphere_model));
-                glUniformMatrix3fv(U_TRANSFORM_NORMAL, 1, false, glm::value_ptr(sphere_NormalMatrix));
+                glBindVertexArray(sphereObjceet.vaoId);
+                glActiveShaderProgram(state.renderPipeline, vShaderSu57.shaderId);
+                {
+                    glUniformMatrix4fv(U_TRANSFORM_MODEL, 1, false, glm::value_ptr(sphere_model));
+                    glUniformMatrix3fv(U_TRANSFORM_NORMAL, 1, false, glm::value_ptr(sphere_NormalMatrix));
+                }
+                glActiveShaderProgram(state.renderPipeline, fShaderSu57.shaderId);
+                {
+                    glUniform1f(U_HIT_TINT, 0.0f);
+                    glUniform4f(U_DEBUG_COLOR, 1.0f, 1.0f, 0.0f, 1.0f);  // flat yellow
+                }
+                glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+                glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(sphereObjceet.indexCount), GL_UNSIGNED_INT, nullptr);
+                glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
             }
-            glActiveShaderProgram(state.renderPipeline, fShaderSu57.shaderId);
-            {
-                glUniform1f(U_HIT_TINT, 0.0f);
-                glUniform4f(U_DEBUG_COLOR, 1.0f, 1.0f, 0.0f, 1.0f);  // flat yellow
-            }
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(sphereObjceet.indexCount), GL_UNSIGNED_INT, nullptr);
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
         }
 
         glDepthFunc(GL_LEQUAL);
@@ -1586,6 +1661,42 @@ BURAYA:
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
         glDrawArrays(GL_TRIANGLES, 0, 6);
         glDepthFunc(GL_LESS);
+
+        // --- Explosion billboards (additive, camera-facing) ---
+        // Drawn after the sky so empty-background explosions aren't overwritten,
+        // still inside the (HDR) FBO so they go through the tonemapper.
+        if (explosionTex != 0 && !explosions.empty()) {
+            glUseProgramStages(state.renderPipeline, GL_VERTEX_SHADER_BIT, explosionVert.shaderId);
+            glUseProgramStages(state.renderPipeline, GL_FRAGMENT_SHADER_BIT, explosionFrag.shaderId);
+            glBindVertexArray(quad_VertexArrayID);
+
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_ONE, GL_ONE);    // additive: independent of output alpha
+            glDepthMask(GL_FALSE);          // transparent: test depth, don't write it
+
+            glActiveTexture(GL_TEXTURE0 + 16);
+            glBindTexture(GL_TEXTURE_2D, explosionTex);
+
+            glActiveShaderProgram(state.renderPipeline, explosionFrag.shaderId);
+            glUniform1ui(24, myinputs.hdr_on ? 1u : 0u);
+
+            glActiveShaderProgram(state.renderPipeline, explosionVert.shaderId);
+            glUniformMatrix4fv(1, 1, GL_FALSE, glm::value_ptr(view));
+            glUniformMatrix4fv(2, 1, GL_FALSE, glm::value_ptr(proj));
+            glUniform1f(71, 30.0f);                 // ~30 world units per side
+            glUniform1i(74, explosionFrames);
+
+            for (const auto& ex : explosions) {
+                int frame = static_cast<int>((ex.timer / ex.duration) * explosionFrames);
+                frame = glm::clamp(frame, 0, explosionFrames - 1);
+                glUniform3fv(70, 1, glm::value_ptr(ex.position));
+                glUniform1i(72, frame);
+                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            }
+
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+        }
 
         if (myinputs.hdr_on) {
             (1, hdrSampler);

@@ -285,6 +285,15 @@ struct EnemyPlane
     bool      initialized = false;          // first frame seeds position
 };
 
+// A short-lived billboard explosion spawned at an impact point.
+struct Explosion
+{
+    glm::vec3 position{ 0.0f };
+    float     timer    = 0.0f;   // counts up from 0
+    float     duration = 0.6f;   // total animation length
+    bool      alive    = true;
+};
+
 namespace detail
 {
     inline glm::vec3 lorenzDeriv(const glm::vec3& s, const EnemyPath& p)
