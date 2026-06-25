@@ -87,6 +87,9 @@ struct GpuEnemy { vec4 pos_radius; vec4 alive_pad; }; // xyz=pos, w=radius; aliv
 layout(std430 ,  binding = 14) buffer EnemyBuffer {
 	GpuEnemy gpuEnemies[] ;
 };
+layout(std430 ,  binding = 15) buffer TerrainImpactBuffer {
+	vec4 terrainImpact ;   // xyz = world pos of a terrain hit, w = 1 when set
+};
 
 vec3 retnormal ;  
 vec3 get_vertex(int index){
@@ -430,6 +433,8 @@ for (int i = 0; i <= num_steps; i++) {
 				carve_crater(explosion_point,
 				             my_cur_missile.bl_rad_ifboom_ifactive_timesinceboom.x,
 				             crater_depth, crater_rim);
+					// Report the impact world position so the CPU can spawn an explosion.
+					terrainImpact = vec4(explosion_point, 1.0f);
             break; // PATLADI
         }
 

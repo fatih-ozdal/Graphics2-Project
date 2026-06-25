@@ -934,6 +934,14 @@ BURAYA:
     glBufferData(GL_SHADER_STORAGE_BUFFER, kMaxEnemies * sizeof(GLuint), nullptr, GL_DYNAMIC_COPY);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 12, enemyHitSSBO);
 
+    // Terrain impact (binding 15): missile.comp writes vec4(worldPos, 1) when a
+    // missile hits the ground; the CPU reads it to spawn a terrain explosion.
+    GLuint terrainImpactSSBO;
+    glGenBuffers(1, &terrainImpactSSBO);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, terrainImpactSSBO);
+    { glm::vec4 zero(0.0f); glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(glm::vec4), &zero, GL_DYNAMIC_COPY); }
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 15, terrainImpactSSBO);
+
     // CPU gate: only read enemyHitSSBO back while a missile is considered live.
     // Rough window during which a shot should have resolved or expired.
     const float kMissileLifetime  = 5.0f;
@@ -1389,6 +1397,12 @@ BURAYA:
             std::vector<GLuint> zeros(enemies.size(), 0);
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, enemyHitSSBO);
             glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, zeros.size() * sizeof(GLuint), zeros.data());
+
+            // Clear the terrain-impact flag too, so a stale hit from a gate-closed
+            // window can't leak into a later shot.
+            glm::vec4 zeroImpact(0.0f);
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, terrainImpactSSBO);
+            glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(glm::vec4), glm::value_ptr(zeroImpact));
         }
 
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 9, missileSSBO);
@@ -1396,6 +1410,7 @@ BURAYA:
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 11, normalBuffer);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 12, enemyHitSSBO);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 14, enemySSBO);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 15, terrainImpactSSBO);
 
         GLuint dispatch_buffer_3;
         glUseProgram(computeShaderMissile.shaderId);
@@ -1447,31 +1462,46 @@ BURAYA:
         if (anyMissileActive && current_time >= missileActiveUntil)
             anyMissileActive = false;
 
-        // Read back the per-enemy hit flags only while a missile is in flight and
-        // at least one enemy is alive (gates the VIDEO->HOST copy).
-        bool anyEnemyAlive = false;
-        for (auto& e : enemies) if (e.alive) { anyEnemyAlive = true; break; }
-        if (anyMissileActive && anyEnemyAlive) {
-            std::vector<GLuint> hits(enemies.size(), 0);
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, enemyHitSSBO);
-            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                               hits.size() * sizeof(GLuint), hits.data());
-            bool anyHit = false;
-            for (size_t i = 0; i < enemies.size(); ++i) {
-                // Find which enemy was struck and kill only that one.
-                if (hits[i] != 0 && enemies[i].alive) {
-                    enemies[i].alive    = false;   // stop flying it
-                    enemies[i].hitTimer = 2.0f;    // ...but keep drawing it red for ~2s
-                    explosions.push_back(combat::Explosion{ enemies[i].position, 0.0f, 0.6f, true });
-                    anyHit = true;
+        // Read GPU hit reports back only while a missile is in flight (gates the
+        // VIDEO->HOST copy that would otherwise run every frame).
+        if (anyMissileActive) {
+            // --- Per-enemy hits (only worth reading if an enemy is still alive) ---
+            bool anyEnemyAlive = false;
+            for (auto& e : enemies) if (e.alive) { anyEnemyAlive = true; break; }
+            if (anyEnemyAlive) {
+                std::vector<GLuint> hits(enemies.size(), 0);
+                glBindBuffer(GL_SHADER_STORAGE_BUFFER, enemyHitSSBO);
+                glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                                   hits.size() * sizeof(GLuint), hits.data());
+                bool anyHit = false;
+                for (size_t i = 0; i < enemies.size(); ++i) {
+                    // Find which enemy was struck and kill only that one.
+                    if (hits[i] != 0 && enemies[i].alive) {
+                        enemies[i].alive    = false;   // stop flying it
+                        enemies[i].hitTimer = 2.0f;    // ...but keep drawing it red for ~2s
+                        explosions.push_back(combat::Explosion{ enemies[i].position, 0.0f, 0.6f, true });
+                        anyHit = true;
+                    }
+                }
+                if (anyHit) {
+                    anyMissileActive = false;   // a missile resolved; stop polling immediately
+                    // Clear the flags so they can't re-trigger next frame.
+                    std::vector<GLuint> zeros(enemies.size(), 0);
+                    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+                                    zeros.size() * sizeof(GLuint), zeros.data());
                 }
             }
-            if (anyHit) {
-                anyMissileActive = false;   // a missile resolved; stop polling immediately
-                // Clear the flags so they can't re-trigger next frame.
-                std::vector<GLuint> zeros(enemies.size(), 0);
-                glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                                zeros.size() * sizeof(GLuint), zeros.data());
+
+            // --- Terrain hit: spawn an explosion at the reported impact point ---
+            glm::vec4 terrainImpact(0.0f);
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, terrainImpactSSBO);
+            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(glm::vec4),
+                               glm::value_ptr(terrainImpact));
+            if (terrainImpact.w > 0.5f) {
+                explosions.push_back(combat::Explosion{ glm::vec3(terrainImpact), 0.0f, 0.6f, true });
+                glm::vec4 zero(0.0f);   // reset the flag so it can't re-trigger next frame
+                glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(glm::vec4),
+                                glm::value_ptr(zero));
             }
         }
 
