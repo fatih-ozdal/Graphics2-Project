@@ -8,16 +8,18 @@ simulator. The HW2 renderer already drew a B-spline terrain, water, and a sky; t
 project adds gameplay on top of that terrain — flying a plane, firing missiles, killing
 enemies, and deforming the ground.
 
-The project was supposed to be collaborative between me and my friend İsmail. We had
-disagreements early on about which codebase to build on — I suggested using the HW3 starter
-code since it had already been implemented, while İsmail preferred to continue from his own
-HW2 codebase. After some back and forth, I agreed to build on top of his code. We didn't end
-up working on it together in person — he sent me his codebase with the parts he had finished
-(hit detection, missile flight physics, and the missile and plane 3D models we had picked
-together), and I extended it from there.
+The project was originally meant to be collaborative with my friend İsmail, but we struggled
+to communicate during it, so we ended up working separately. We had picked the missile and
+plane 3D models together earlier on. He sent me his codebase with the parts he had already
+done — hit detection, missile flight physics, and the chosen models placed in the scene — and
+I extended it from there, hoping we might merge our work later. I didn't realize until late
+that he had already finished his own version separately. The features documented in this post
+are the ones I built on top of his foundation.
 
-My contribution is the enemy planes, the Lorenz attractor movement, the terrain crater
-deformation in the compute shader, and all the bug fixes documented in this post.
+My contribution is the enemy planes with Lorenz-attractor flight, multi-enemy spawning, the
+bounding sphere collision visualization, the terrain crater deformation compute shader, the
+CPU height cache, the red hit-feedback flash, the sprite-sheet explosions on both enemy and
+terrain hits, and all the bug fixes documented in this post.
 
 The fixes described here are mostly small — a usage flag, a clamp, a sign change, a
 threshold — but most of the work was in locating them, since the cause was usually a layer
@@ -26,7 +28,7 @@ or two away from the symptom.
 The topics, roughly in the order they were tackled:
 
 - Architecture: a CPU logic layer, GPU deformation, and why I don't read the terrain back
-- Implementation: the enemy's Lorenz-attractor flight, the crater compute shader, the CPU height cache
+- Implementation: the enemy's Lorenz-attractor flight, the red hit-feedback flash, multi-enemy spawning, sprite-sheet explosions on enemy and terrain hits, the crater compute shader, the CPU height cache, and a fully GPU-side explosion system as the next step
 - The out-of-memory problem (GL_DYNAMIC_READ + per-frame readback)
 - The Lorenz attractor producing NaN on the first frame
 - Boundary vertex duplication and the torn crater rim
