@@ -81,6 +81,7 @@ set(SRC_ALL
     ${CMAKE_CURRENT_SOURCE_DIR}/src/utility.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/thread_pool.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/thread_pool.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/extracted/combat.hpp
     # For example,
     # ${CMAKE_CURRENT_SOURCE_DIR}/src/myNewFile.cpp
     )
