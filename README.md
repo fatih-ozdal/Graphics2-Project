@@ -11,8 +11,8 @@ ground. A write-up of the implementation and the bugs fought along the way is in
 The latest version of the project is demonstrated in the video below:
 
 <p align="center">
-  <a href="https://youtu.be/TFnFJZWPTgw">
-    <img src="https://img.youtube.com/vi/TFnFJZWPTgw/0.jpg" alt="Demo Video"/>
+  <a href="https://youtu.be/6n8BxB0Q7zs">
+    <img src="https://img.youtube.com/vi/6n8BxB0Q7zs/0.jpg" alt="Demo Video"/>
   </a>
 </p>
 
