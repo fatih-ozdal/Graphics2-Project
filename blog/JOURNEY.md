@@ -696,8 +696,8 @@ Below is a demo video of the finished build.
 **Demo Video** — click to watch on YouTube
 
 <p align="center">
-  <a href="https://youtu.be/TFnFJZWPTgw">
-    <img src="https://img.youtube.com/vi/TFnFJZWPTgw/0.jpg" alt="Demo Video"/>
+  <a href="https://youtu.be/6n8BxB0Q7zs">
+    <img src="https://img.youtube.com/vi/6n8BxB0Q7zs/0.jpg" alt="Demo Video"/>
   </a>
 </p>
 
